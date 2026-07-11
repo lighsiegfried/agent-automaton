@@ -1,0 +1,18 @@
+# Optional support service: runs the API in SIMULATED mode only.
+#
+# Docker CANNOT control the Windows desktop — containers have no access to the
+# user session, windows, keyboard, mouse, or installed apps. Real automation
+# always runs directly on the Windows host via scripts/run_dev.ps1.
+# See docs/ARCHITECTURE.md ("Windows host vs Docker").
+#
+# Convention: this file is named compose.yml, never docker-compose.yml.
+
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      # Hard-pinned: real execution is impossible in a container anyway
+      # (the code also requires a Windows host), but be explicit.
+      ENABLE_REAL_WINDOWS_TOOLS: "false"

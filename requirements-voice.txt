@@ -1,0 +1,9 @@
+# Optional voice dependencies (Phase 3A). Not required for the base API.
+# Install with:  pip install -r requirements-voice.txt
+# (faster-whisper downloads its model on first use; GPU is used when available.)
+
+faster-whisper>=1.0     # speech-to-text (app/voice/stt.py)
+sounddevice>=0.4.7      # microphone capture (scripts/voice_command.py)
+soundfile>=0.12         # WAV read/write for the CLI recorder
+numpy>=1.26             # required by sounddevice/soundfile
+pyttsx3>=2.90           # text-to-speech via Windows SAPI (app/voice/tts.py)
