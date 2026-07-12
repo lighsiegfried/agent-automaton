@@ -1,0 +1,19 @@
+{
+  "name": "fifi_ejecutiva",
+  "engine": "qwen3_tts",
+  "model": "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+  "language": "es",
+  "speaker": "",
+  "speed": 1.0,
+  "style_instruction": "Voz femenina adulta, profesional y compuesta, de dicción impecable y tono medio firme; cadencia medida y segura, sin prisa, con la autoridad amable de una directora presentando resultados.",
+  "sample_rate": 24000,
+  "device": "cuda",
+  "dtype": "bfloat16",
+  "fallback_engine": "kokoro",
+  "provenance": {
+    "source": "built-in",
+    "phase": "3D.0.2",
+    "created": "2026-07-11",
+    "notes": "Identidad diseñada (VoiceDesign): professional, composed adult female."
+  }
+}

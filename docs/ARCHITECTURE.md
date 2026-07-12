@@ -37,9 +37,60 @@ This is enforced in code, not just by convention: `real_windows_tools_enabled()`
 even if misconfigured.
 
 Docker is allowed only for **optional support services**. The provided
-`compose.yml` (always this name, never `docker-compose.yml`) runs the API in
-simulated mode — useful for trying the routing/safety pipeline from another
-machine — and contains nothing else.
+`compose.yml` (always this name, never `docker-compose.yml`) defines:
+
+- `api` — the FastAPI app in simulated mode, useful for trying the
+  routing/safety pipeline from another machine.
+- `ollama` — local LLM inference for the planner and response generator,
+  gated behind the `llm` profile (`docker compose --profile llm up -d ollama`),
+  bound to `127.0.0.1` only, with models in a named volume. **GPU-first:** the
+  service reserves the NVIDIA GPU by default and `scripts/docker_llm.py`
+  verifies GPU visibility inside the container before any inference; CPU-only
+  operation requires an explicit `ALLOW_CPU_OLLAMA=true` opt-in.
+
+The split is deliberate: **the host runner acts, support services only think.**
+Ollama receives text and returns text — its output enters the pipeline as an
+untrusted plan or as a reply to phrase, both of which are validated and pass
+the same safety layer. Nothing that runs in Docker can touch the desktop, and
+`scripts/llm_smoke.py` refuses to run against an API with real Windows tools
+enabled.
+
+## Local persistent runtime (Phase 3B.7)
+
+`scripts/local_runtime.py` is the one-command manager for Fifi's local stack.
+It embodies the host/Docker split directly:
+
+- **Dockerized Ollama** is a persistent *support service*. `compose.yml` marks
+  the `ollama` service `restart: unless-stopped` (still `llm`-profile-gated,
+  bound to `127.0.0.1`, GPU-first, models in the `ollama-models` volume), so the
+  LLM backend survives reboots. `start` brings it up, verifies the GPU inside
+  the container, and verifies/pulls the model.
+- **The FastAPI server runs on the Windows host**, never in Docker — it is the
+  process that can (when `.env` allows) touch the desktop. `local_runtime.py`
+  launches `uvicorn app.main:app` on the host, records its PID under
+  `storage/runtime/`, and streams its output to `storage/logs/` (both
+  gitignored). It inherits configuration from `.env`; it does **not** override
+  safety-relevant flags and never enables real Windows tools.
+
+```
+python scripts/local_runtime.py start
+        |
+        |-- Docker:  compose --profile llm up -d ollama   (GPU-first support svc)
+        |            wait -> verify GPU in container -> verify/pull model
+        |
+        `-- Host:    uvicorn app.main:app  (PID -> storage/runtime/api.pid)
+                     wait -> GET /health -> GET /identity (agent_name == "Fifi")
+```
+
+`stop` terminates only the host API process this script started and clears its
+PID; it leaves Ollama running by default (persistent) and **never removes models
+or Docker volumes** — `--stop-ollama` stops the service with `compose stop`
+(not `down`, never `-v`). `status` reports Docker availability, the Ollama
+container state, GPU detection and name, the configured model and whether it is
+present, whether the host API is up, and Fifi's `/identity`. Startup is purely
+about *where* things run — it changes no tool permission (see
+`docs/SAFETY_RULES.md`). Config: `API_HOST`, `API_PORT`,
+`RUNTIME_AUTO_START_OLLAMA`, `RUNTIME_REQUIRE_GPU`, `RUNTIME_KEEP_OLLAMA_RUNNING`.
 
 ## Execution modes
 
@@ -129,6 +180,41 @@ The voice dependencies (`requirements-voice.txt`) are optional. Missing
 packages degrade gracefully: STT answers `"unavailable"` with an install hint,
 TTS falls back to simulation. Wake word detection (`app/voice/wake_word.py`)
 remains a placeholder for Phase 3B.
+
+## Push-to-talk client (Phase 3C, Windows host)
+
+`scripts/fifi_ptt.py` is a **host-only client** — like the desktop automation
+runner, it never runs in Docker. It holds no authority: it only records audio
+while a global hotkey is held and posts it to the same `/voice/command`
+endpoint a `.wav` upload would use. It cannot enable real tools, cannot unblock
+anything, and adds no new execution path.
+
+```
+hold PTT_HOTKEY (default ctrl+alt+space) on the Windows host
+     |  record while held -> 16 kHz mono WAV (Esc cancels; PTT_MAX_SECONDS caps)
+     v
+POST /voice/command  -> transcription -> handle_command() (same safety layer)
+     |
+     v
+print transcription / intent / safety status / planner / Fifi reply
+     |  (API speaks it when VOICE_SPEAK_COMMAND_RESPONSE=true)
+     v
+temp WAV deleted immediately after processing
+```
+
+Sensitive actions use a **one-shot, short-lived confirmation** held only in the
+client's memory: a `needs_confirmation` result stores exactly one pending
+command; the next *exact* phrase `confirm` / `confirmar` / `yes confirm` /
+`sí confirmar` resends the original command with `confirm=true` (via
+`POST /command`), while `cancel` / `cancelar` / `no`, a different command, a
+`PTT_CONFIRM_WINDOW_SECONDS` timeout, or a process restart all clear it. Matching
+is exact — never fuzzy — so nothing an LLM or a mumble produces can approve an
+action by accident.
+
+Launch it with `python scripts/local_runtime.py ptt` (never auto-started by
+`start`). `local_runtime.py status` reports whether the desktop dependencies are
+present and whether the API has voice enabled. There is still **no always-on
+microphone and no wake word** — the mic is live only while the key is held.
 
 ## Key components
 

@@ -1,0 +1,877 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fifi Voice Designer</title>
+<style>
+  :root { --bg:#0f1117; --panel:#181b24; --line:#2a2f3d; --text:#e8eaf0; --dim:#9aa2b5;
+          --accent:#7c6cff; --ok:#3ecf8e; --warn:#ffb454; --err:#ff6b6b; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:15px/1.5 system-ui,'Segoe UI',sans-serif; background:var(--bg); color:var(--text); }
+  header { padding:12px 22px; border-bottom:1px solid var(--line); display:flex; gap:14px;
+           align-items:center; flex-wrap:wrap; position:sticky; top:0; background:var(--bg); z-index:5; }
+  header h1 { font-size:18px; margin:0; }
+  .pill { padding:5px 13px; border:1px solid var(--line); border-radius:20px; font-size:13px; }
+  .pill.ok { color:var(--ok); } .pill.busy { color:var(--warn); } .pill.err { color:var(--err); }
+  main { display:grid; grid-template-columns:minmax(320px,410px) 1fr; gap:18px; padding:18px 22px; }
+  @media (max-width: 980px){ main { grid-template-columns:1fr; } }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:12px;
+           padding:16px; margin-bottom:18px; }
+  .panel h2 { margin:0 0 12px; font-size:14px; color:var(--dim); text-transform:uppercase;
+              letter-spacing:.06em; }
+  label { display:block; font-size:12px; color:var(--dim); margin:9px 0 3px; }
+  input, select, textarea { width:100%; padding:7px 9px; border-radius:8px; border:1px solid var(--line);
+    background:#10131b; color:var(--text); font:inherit; }
+  textarea { min-height:56px; resize:vertical; }
+  .row { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  .row3 { display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px; }
+  button { padding:7px 13px; border-radius:8px; border:1px solid var(--line); background:#232839;
+           color:var(--text); cursor:pointer; font:inherit; font-size:13px; }
+  button:hover { border-color:var(--accent); }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600; }
+  button.danger:hover { border-color:var(--err); color:var(--err); }
+  button:disabled { opacity:.45; cursor:wait; }
+  .muted { color:var(--dim); font-size:13px; }
+  .tag { font-size:11px; padding:1px 8px; border:1px solid var(--line); border-radius:10px;
+         color:var(--dim); white-space:nowrap; }
+  .tag.active { color:var(--ok); border-color:var(--ok); }
+  .tag.mode { color:var(--accent); }
+  .tag.off { color:var(--err); }
+
+  /* job progress */
+  #job-panel { display:none; border-color:var(--accent); }
+  #job-stages { margin:8px 0; padding:0; list-style:none; font-size:13px; max-height:180px; overflow:auto; }
+  #job-stages li { padding:2px 0 2px 18px; position:relative; color:var(--dim); }
+  #job-stages li.now { color:var(--text); }
+  #job-stages li.now::before { content:'▸'; position:absolute; left:2px; color:var(--accent); }
+  #job-stages li.done::before { content:'✓'; position:absolute; left:2px; color:var(--ok); }
+  .bar { height:6px; background:#10131b; border-radius:3px; overflow:hidden; margin:6px 0; }
+  .bar > div { height:100%; background:var(--accent); width:0%; transition:width .4s; }
+  #job-meta { display:flex; gap:14px; flex-wrap:wrap; font-size:12px; color:var(--dim); }
+
+  /* profile cards */
+  #profiles-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(270px,1fr)); gap:12px; }
+  .card { border:1px solid var(--line); border-radius:10px; padding:12px; background:#141722;
+          display:flex; flex-direction:column; gap:6px; }
+  .card.active-voice { border-color:var(--ok); }
+  .card .name { font-weight:600; font-size:15px; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .card .facts { display:flex; gap:6px; flex-wrap:wrap; }
+  .card .actions { display:flex; gap:6px; flex-wrap:wrap; margin-top:auto; padding-top:8px; }
+  .audition { border-top:1px dashed var(--line); margin-top:8px; padding-top:8px; }
+  .audition .stats { font-size:12px; color:var(--dim); margin-top:6px; line-height:1.7; }
+  audio { width:100%; margin-top:6px; height:34px; }
+
+  /* variants */
+  .variant { border:1px solid var(--line); border-radius:10px; padding:12px; margin-bottom:12px; }
+  .variant .head { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  .variant .head input { width:180px; }
+  .variant .actions { display:flex; gap:8px; margin-top:8px; flex-wrap:wrap; }
+
+  /* models */
+  .model-row { display:flex; gap:10px; align-items:center; padding:5px 0; font-size:13px;
+               border-bottom:1px dashed var(--line); flex-wrap:wrap; }
+  .model-row:last-child { border-bottom:none; }
+  .model-row .grow { flex:1; min-width:140px; }
+
+  /* modal */
+  #modal-back { display:none; position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:20; }
+  #modal { position:fixed; top:7vh; left:50%; transform:translateX(-50%); width:min(680px,92vw);
+           max-height:84vh; overflow:auto; background:var(--panel); border:1px solid var(--line);
+           border-radius:14px; padding:20px; z-index:21; }
+  #modal dl { display:grid; grid-template-columns:170px 1fr; gap:4px 12px; font-size:13px; margin:12px 0; }
+  #modal dt { color:var(--dim); } #modal dd { margin:0; word-break:break-word; }
+  #status-line { min-height:20px; margin-top:8px; font-size:13px; }
+  #status-line.err { color:var(--err); } #status-line.ok { color:var(--ok); }
+  details { margin-top:14px; } summary { cursor:pointer; color:var(--dim); }
+
+  /* version / store banners + structured error panel (Phase 3D.0.3a) */
+  .banner { display:none; margin:0 22px; margin-top:12px; padding:10px 14px;
+            border:1px solid var(--err); border-radius:10px; color:var(--err);
+            background:rgba(255,107,107,.08); font-size:14px; }
+  .banner.warn { border-color:var(--warn); color:var(--warn); background:rgba(255,180,84,.08); }
+  #error-panel { display:none; border:1px solid var(--err); border-radius:10px;
+                 padding:12px; margin-top:10px; background:rgba(255,107,107,.06); }
+  #error-panel .msg { color:var(--err); font-size:14px; }
+  #error-panel pre { white-space:pre-wrap; word-break:break-word; font-size:12px;
+                     color:var(--dim); background:#10131b; padding:8px; border-radius:8px; }
+  #error-panel details { margin-top:8px; }
+  #error-panel .actions { display:flex; gap:8px; margin-top:10px; flex-wrap:wrap; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🎙️ Fifi Voice Designer</h1>
+  <span class="muted">local · 127.0.0.1:8766</span>
+  <span id="worker-pill" class="pill">worker: …</span>
+  <span id="active-banner" class="pill ok" style="margin-left:auto">voz activa: …</span>
+</header>
+<div id="compat-banner" class="banner">La interfaz y el worker tienen versiones diferentes. Reinicia Voice Lab.
+  <span class="muted">(python scripts/local_runtime.py voice-restart)</span></div>
+<div id="store-banner" class="banner warn"></div>
+<main>
+  <section><!-- LEFT column -->
+    <div class="panel">
+      <h2>Diseñar una identidad</h2>
+      <label>Nombre del perfil</label>
+      <input id="f-name" placeholder="fifi_luna" pattern="[a-z0-9_-]+">
+      <div class="row">
+        <div><label>Modo</label><select id="f-mode"></select></div>
+        <div><label>Idioma</label><select id="f-language"></select></div>
+      </div>
+      <div class="row3">
+        <div><label>Edad percibida</label><select id="f-age"></select></div>
+        <div><label>Presentación</label><select id="f-gender"></select></div>
+        <div><label>Timbre</label><select id="f-timbre"></select></div>
+      </div>
+      <div class="row3">
+        <div><label>Tono (pitch)</label><select id="f-pitch"></select></div>
+        <div><label>Energía</label><select id="f-energy"></select></div>
+        <div><label>Velocidad</label><select id="f-speed"></select></div>
+      </div>
+      <div class="row3">
+        <div><label>Acento</label><select id="f-accent"></select></div>
+        <div><label>Emoción</label><select id="f-emotion"></select></div>
+        <div><label>Personalidad</label><select id="f-personality"></select></div>
+      </div>
+      <label>Instrucción libre (opcional)</label>
+      <textarea id="f-instruction" placeholder="p. ej. como una locutora de radio nocturna…"></textarea>
+      <label>Texto de prueba</label>
+      <textarea id="f-preview"></textarea>
+      <div class="row" style="margin-top:12px">
+        <div><label>Variantes</label><select id="f-count"><option>3</option><option>4</option></select></div>
+        <div style="display:flex;align-items:flex-end">
+          <button class="primary" id="btn-generate" style="width:100%">Generar variantes</button>
+        </div>
+      </div>
+      <div id="status-line"></div>
+      <div id="error-panel">
+        <div class="msg"></div>
+        <details><summary>Detalles técnicos</summary><pre></pre></details>
+        <div class="actions">
+          <button id="err-copy">Copiar diagnóstico</button>
+          <button id="err-retry" class="primary">Reintentar</button>
+          <button id="err-close">Cerrar</button>
+        </div>
+      </div>
+      <details>
+        <summary>Clon de referencia autorizado (avanzado)</summary>
+        <p class="muted">Clonar una voz REAL requiere autorización explícita de la persona.
+        Las voces diseñadas arriba son sintéticas y no la necesitan.</p>
+        <label>Nombre del perfil</label><input id="r-name" placeholder="voz_autorizada">
+        <label>Audio de referencia (.wav)</label><input type="file" id="r-file" accept=".wav">
+        <label>Transcripción exacta del audio</label><textarea id="r-transcript"></textarea>
+        <label>Declaración de autorización</label>
+        <textarea id="r-auth" placeholder="Quién autorizó el uso de esta voz y cuándo"></textarea>
+        <button id="btn-reference" style="margin-top:8px">Congelar clon autorizado</button>
+      </details>
+    </div>
+
+    <div class="panel">
+      <h2>Estado de modelos</h2>
+      <div id="models-box" class="muted">cargando…</div>
+      <div style="display:flex; gap:8px; margin-top:10px; flex-wrap:wrap">
+        <button id="btn-models-refresh">Actualizar</button>
+        <button id="btn-warm">Calentar voz activa</button>
+        <button id="btn-unload" class="danger">Liberar modelos de Voice Lab</button>
+      </div>
+      <p class="muted" style="margin:8px 0 0">Liberar descarga los modelos de la VRAM;
+      los archivos en caché nunca se borran.</p>
+    </div>
+  </section>
+
+  <section><!-- RIGHT column -->
+    <div class="panel" id="job-panel">
+      <h2 id="job-title">Trabajo en curso</h2>
+      <div class="bar"><div id="job-bar"></div></div>
+      <ul id="job-stages"></ul>
+      <div id="job-meta"></div>
+      <div style="margin-top:10px"><button id="btn-cancel" class="danger">Cancelar</button></div>
+    </div>
+
+    <div class="panel" id="variants-panel" style="display:none">
+      <h2 id="variants-title">Variantes</h2>
+      <p class="muted" id="variants-hint"></p>
+      <div id="variants"></div>
+      <div id="ab-variants" class="muted"></div>
+    </div>
+
+    <div class="panel">
+      <h2>Comparar voces A/B</h2>
+      <div class="row3">
+        <div><label>Voz A</label><select id="cmp-a"></select></div>
+        <div><label>Voz B</label><select id="cmp-b"></select></div>
+        <div style="display:flex;align-items:flex-end"><button id="btn-compare" style="width:100%">Comparar</button></div>
+      </div>
+      <label>Frase (la misma para ambas)</label>
+      <textarea id="cmp-text"></textarea>
+      <div id="cmp-results" class="row" style="margin-top:10px"></div>
+    </div>
+
+    <div class="panel">
+      <h2>Perfiles guardados</h2>
+      <p class="muted">Un perfil con el mismo hablante y distinta velocidad es una
+      <b>variante de estilo</b>, no una voz distinta. Las identidades diseñadas y los
+      clones sí son timbres diferentes.</p>
+      <div id="profiles-grid"></div>
+    </div>
+  </section>
+</main>
+
+<div id="modal-back" onclick="closeModal()"></div>
+<div id="modal" style="display:none"></div>
+
+<script>
+// Must equal API_BUILD in app/build.py — a stale worker serving this (newer)
+// page is detected by the mismatch and generation is disabled.
+const UI_BUILD = '3d.0.4';
+const $ = (id) => document.getElementById(id);
+// Responses keep their HTTP status (__http) so errors show the REAL code
+// instead of coercing a 404 from a stale worker into fake-healthy state.
+const api = async (path, opts) => {
+  const r = await fetch(path, opts);
+  let body = {};
+  try { body = await r.json(); } catch (e) {}
+  if (body && typeof body === 'object' && !Array.isArray(body)) body.__http = r.status;
+  return body;
+};
+const post = (path, body) => api(path, {method:'POST', headers:{'Content-Type':'application/json'},
+                                        body: JSON.stringify(body)});
+const DEFAULT_TEST = "Hola, soy Fifi. Esta es una prueba de mi voz. ¿Cómo te gustaría que sonara?";
+let state = null, details = [], working = null, currentJob = null, openAudition = null;
+let compatible = null, lastSubmit = null;
+// Connection tracking: /health every 2 s while connected, every 1 s while
+// disconnected, exponential backoff capped at 10 s. Reconnects automatically.
+let conn = {failures: 0, delay: 2000, instance: null};
+
+/* ---------------- build compatibility + store health (Phase 3D.0.3a) ------------- */
+
+function setCompat(ok){
+  compatible = ok;
+  $('compat-banner').style.display = ok ? 'none' : 'block';
+  for (const id of ['btn-generate','btn-compare','btn-warm','btn-reference'])
+    $(id).disabled = !ok;
+}
+function setStoreBanner(store){
+  const el = $('store-banner');
+  if (store && store.valid === false){
+    el.textContent = 'Almacén de perfiles degradado: ' + (store.error || 'error desconocido');
+    el.style.display = 'block';
+  } else el.style.display = 'none';
+}
+
+/* ---------------- structured job errors (req. 8) ---------------- */
+
+function hideError(){ $('error-panel').style.display = 'none'; }
+function showJobError(resp){
+  const panel = $('error-panel');
+  const message = resp.user_message || resp.message || 'No se pudo iniciar el trabajo.';
+  panel.querySelector('.msg').textContent = message +
+    (resp.retryable ? ' Puedes reintentarlo.' : '');
+  const diag = {
+    http_status: resp.__http ?? resp.http_status ?? null,
+    error_code: resp.error_code || 'unknown_error',
+    technical: resp.technical || '',
+    worker: resp.worker || null,
+    active_heavy_job: resp.active_heavy_job || null,
+    memory: resp.memory || null,
+    ui_build: UI_BUILD,
+  };
+  panel.querySelector('pre').textContent =
+    `HTTP ${diag.http_status} · ${diag.error_code}\n` + JSON.stringify(diag, null, 2);
+  $('err-retry').style.display = (resp.retryable && lastSubmit) ? '' : 'none';
+  panel.style.display = 'block';
+  status('', '');
+}
+$('err-close').onclick = hideError;
+$('err-copy').onclick = () => {
+  navigator.clipboard.writeText($('error-panel').querySelector('pre').textContent)
+    .then(() => status('Diagnóstico copiado al portapapeles.', 'ok'));
+};
+$('err-retry').onclick = () => {
+  if (!lastSubmit) return;
+  hideError();
+  runJob(lastSubmit.path, lastSubmit.body, lastSubmit.onDone);
+};
+
+function status(message, kind=''){ const el = $('status-line'); el.textContent = message; el.className = kind; }
+function fill(select, options, blank=true){
+  const prev = select.value; select.innerHTML = '';
+  if (blank) select.add(new Option('—', ''));
+  for (const value of options) select.add(new Option(value, value));
+  if (prev) select.value = prev;
+}
+// Only one audio element plays at a time (A/B nunca suena en paralelo).
+document.addEventListener('play', (e) => {
+  for (const other of document.querySelectorAll('audio'))
+    if (other !== e.target) other.pause();
+}, true);
+
+/* ---------------- jobs: submit + resilient poll + staged progress ----------------
+   The backend is the only source of truth. A job card is never left "loading"
+   when the worker cannot confirm it: disconnects are shown, a restarted worker
+   (new instance_id) marks the job interrupted, and a 404 marks it lost. */
+
+const JOB_TITLES = {voice_design:'Generando variantes', freeze:'Congelando identidad',
+                    profile_preview:'Generando prueba de voz', profile_compare:'Comparación A/B'};
+
+function addStage(text, cls='now'){
+  const stages = $('job-stages');
+  for (const li of stages.querySelectorAll('li.now')) li.className = 'done';
+  const li = document.createElement('li'); li.className = cls; li.textContent = text;
+  stages.appendChild(li); stages.scrollTop = stages.scrollHeight;
+  return li;
+}
+
+async function runJob(startPath, body, onDone, onFail){
+  if (compatible === false){
+    status('La interfaz y el worker tienen versiones diferentes. Reinicia Voice Lab.', 'err');
+    if (onFail) onFail({user_message: 'Versiones incompatibles.'});
+    return;
+  }
+  hideError();
+  lastSubmit = {path: startPath, body, onDone};  // the form is NEVER cleared on failure
+  let job;
+  try { job = await post(startPath, {...body, ui_build: UI_BUILD}); }
+  catch (e) {
+    const failure = {user_message: 'No se pudo contactar con el worker de Voice Lab.',
+                     error_code: 'connection_failed', retryable: true};
+    showJobError(failure);
+    if (onFail) onFail(failure);
+    return;
+  }
+  if (job.status === 'error' || !job.job_id){
+    showJobError(job);
+    if (onFail) onFail(job);
+    return;
+  }
+  attachJob(job, onDone, onFail);
+}
+
+function attachJob(job, onDone, onFail){
+  currentJob = {
+    id: job.job_id,
+    instance: job.worker_instance_id || conn.instance,   // who owns this job
+    workerStarted: job.worker_started_utc || null,
+    lastConfirmed: Date.now(),                           // last backend confirmation
+    onDone, onFail, lastMsg: '', disconnectedLi: null,
+  };
+  const panel = $('job-panel'), stages = $('job-stages');
+  panel.style.display = 'block'; stages.innerHTML = ''; $('job-bar').style.width = '3%';
+  $('job-title').textContent = JOB_TITLES[job.job_type] || job.job_type;
+  pollJob();
+}
+
+function finishJobCard(kind, text){
+  // kind: done | interrupted | failed
+  addStage(text, kind === 'done' ? 'done' : 'now');
+  $('job-bar').style.width = kind === 'done' ? '100%' : '0%';
+  const finished = currentJob; currentJob = null;
+  setTimeout(() => { if (!currentJob) $('job-panel').style.display = 'none'; },
+             kind === 'done' ? 2500 : 12000);
+  return finished;
+}
+
+function jobInterrupted(message){
+  finishJobCard('interrupted', message);
+  showJobError({user_message: message, error_code: 'worker_restarted',
+                retryable: true, __http: null});
+}
+
+async function pollJob(){
+  if (!currentJob) return;
+  let j = null;
+  try { j = await api(`/jobs/${currentJob.id}`); } catch (e) { j = null; }
+  if (!currentJob) return;  // finished/cleared while awaiting
+
+  if (j === null){
+    // Worker unreachable: SAY SO on the card — never keep showing the last
+    // stage as if it were current. The health loop drives reconnection.
+    if (!currentJob.disconnectedLi){
+      currentJob.disconnectedLi = addStage('worker desconectado — esperando reconexión…');
+    }
+    setTimeout(pollJob, 1500);
+    return;
+  }
+  if (currentJob.disconnectedLi){
+    currentJob.disconnectedLi.remove(); currentJob.disconnectedLi = null;
+  }
+  currentJob.lastConfirmed = Date.now();
+
+  if (j.__http === 404 || j.error_code === 'unknown_job'){
+    jobInterrupted('El trabajo se perdió (el worker no lo reconoce tras reconectar).');
+    return;
+  }
+  if (j.status === 'interrupted'){
+    jobInterrupted(j.error || 'El worker se reinició durante la operación.');
+    refresh(true);
+    return;
+  }
+  if (j.worker_instance_id && currentJob.instance &&
+      j.worker_instance_id !== currentJob.instance){
+    jobInterrupted('El worker se reinició durante la operación.');
+    return;
+  }
+
+  if (j.message && j.message !== currentJob.lastMsg){
+    currentJob.lastMsg = j.message;
+    addStage(j.message);
+  }
+  if (j.percentage != null) $('job-bar').style.width = Math.max(3, j.percentage) + '%';
+  $('job-meta').innerHTML = [
+    `estado: <b>${j.status}</b>`,
+    j.stalled ? '<b style="color:var(--warn)">⚠ sin avance — posible bloqueo</b>' : '',
+    `transcurrido: ${j.elapsed_seconds ?? 0}s`,
+    j.model ? `modelo: ${String(j.model).split('/').pop()}` : '',
+    j.cache_hit === true ? '✔ en caché (sin descarga)' : '',
+    j.cache_hit === false && j.bytes_downloaded ? `descargados ${(j.bytes_downloaded/2**20).toFixed(0)} MB` : '',
+    j.vram_used_gb != null ? `VRAM ${j.vram_used_gb}/${(j.vram_used_gb + j.vram_free_gb).toFixed(1)} GB` : '',
+  ].filter(Boolean).join(' · ');
+
+  if (['completed','failed','cancelled'].includes(j.status)){
+    const finished = finishJobCard(j.status === 'completed' ? 'done' : 'failed',
+      j.status === 'completed' ? 'Listo.' :
+      (j.status === 'cancelled' ? 'Cancelado — temporales eliminados.'
+                                : `Error [${j.error_code}]: ${j.error}`));
+    if (j.status === 'completed' && finished && finished.onDone) finished.onDone(j.result);
+    else if (j.status === 'failed'){
+      const failure = {user_message: j.error || 'el trabajo falló', error_code: j.error_code,
+                       technical: JSON.stringify(j.diagnostic || {}), retryable: true};
+      showJobError(failure);
+      if (finished && finished.onFail) finished.onFail(failure);
+    } else if (finished && finished.onFail){
+      finished.onFail({user_message: 'Trabajo cancelado.', error_code: 'cancelled'});
+    }
+    refresh(true);
+    return;
+  }
+  setTimeout(pollJob, 1000);
+}
+
+async function adoptActiveJobs(){
+  // Page (re)load: never trust local state — ask the backend what is running.
+  try {
+    const active = await api('/jobs/active');
+    const j = (active.jobs || [])[0];
+    if (j && j.job_id && !currentJob) attachJob(j, null);
+  } catch (e) {}
+}
+
+$('btn-cancel').onclick = async () => {
+  if (currentJob) await post(`/jobs/${currentJob.id}/cancel`, {});
+};
+
+/* ---------------- designer form + variants ---------------- */
+
+$('btn-generate').onclick = async () => {
+  const body = {profile_name: $('f-name').value.trim(), mode: $('f-mode').value,
+    language: $('f-language').value, count: parseInt($('f-count').value),
+    preview_text: $('f-preview').value, instruction: $('f-instruction').value};
+  for (const key of ['age','gender','timbre','pitch','energy','speed','accent','emotion','personality'])
+    body[key] = $('f-'+key).value;
+  status('');
+  // Preflight FIRST (Phase 3D.0.4): show the real resource picture, and only
+  // submit when the worker says listo — with the specific reason otherwise.
+  let pf = null;
+  try { pf = await post('/jobs/preflight', {kind: 'voice_design', ui_build: UI_BUILD}); }
+  catch (e) { /* worker unreachable — runJob will report it */ }
+  if (pf && pf.summary){
+    const s = pf.summary;
+    status(`RAM libre ${s.ram_libre_gb} GB · VRAM libre ${s.vram_libre_gb} GB · ` +
+      `almacenamiento libre ${s.almacenamiento_libre_gb} GB · motor ${s.motor_solicitado} · ` +
+      `${s.modelo_en_cache ? 'modelo en caché' : 'requiere descarga'} · ` +
+      `${s.modelo_ya_cargado ? 'modelo ya cargado' : 'modelo sin cargar'} → ${s.resultado}`,
+      s.resultado === 'listo' ? 'ok' : 'err');
+    if (s.resultado !== 'listo'){
+      showJobError({user_message: s.motivo || 'La generación está bloqueada.',
+                    error_code: pf.blocking_reason, retryable: true,
+                    technical: JSON.stringify(pf.checks || {})});
+      return;
+    }
+  }
+  runJob('/jobs/voice-design', body, (manifest) => {
+    working = manifest; renderVariants();
+    // Reveal + focus the variants: never leave only a finished progress bar.
+    const panel = $('variants-panel');
+    panel.style.display = 'block';
+    panel.scrollIntoView({behavior: 'smooth', block: 'start'});
+    status(`${manifest.variants.length} variantes listas para escuchar.`, 'ok');
+  });
+};
+
+function audioUrl(v){ return `/designer/audio?profile_name=${working.profile}&variant_id=${v.id}`; }
+
+function renderVariants(){
+  const panel = $('variants-panel'), box = $('variants'); box.innerHTML = '';
+  if (!working || !working.variants || !working.variants.length){ panel.style.display = 'none'; return; }
+  panel.style.display = 'block';
+  $('variants-title').textContent = `Variantes — ${working.profile} (${working.mode})`;
+  $('variants-hint').textContent = working.instruction;
+  for (const v of working.variants){
+    const div = document.createElement('div'); div.className = 'variant';
+    div.innerHTML = `<div class="head"><input value="${v.label}" data-id="${v.id}" class="rename">
+        <span class="muted">${(v.duration_seconds ?? '?')}s · generada en ${(v.seconds ?? '?')}s</span></div>
+      <div class="variant-player"></div>`;
+    // Every variant is playable IMMEDIATELY — no freezing or activation needed.
+    renderPlayer(div.querySelector('.variant-player'), audioUrl(v), '');
+    const actions = document.createElement('div'); actions.className = 'actions';
+    for (const [label, fn, cls] of [
+      ['↻ Regenerar', () => post('/designer/regenerate', {profile_name: working.profile, variant_id: v.id})
+          .then(r => { if (r.status === 'ok'){ working = r; renderVariants(); } else status(r.message, 'err'); }), ''],
+      ['✔ Elegir esta variante', () => runJob('/jobs/freeze', {profile_name: working.profile, variant_id: v.id},
+          (result) => { status(`Identidad ${result.profile.name} congelada y validada.`, 'ok');
+                        working = null; renderVariants(); refresh(); }), 'primary'],
+      ['🗑 Eliminar', async () => { const r = await api(
+          `/designer/variant?profile_name=${working.profile}&variant_id=${v.id}`, {method:'DELETE'});
+          if (r.status === 'ok'){ working = (r.variants && r.variants.length) ? r : null; renderVariants(); } }, 'danger'],
+    ]){
+      const b = document.createElement('button'); b.textContent = label; if (cls) b.className = cls;
+      b.onclick = fn; actions.appendChild(b);
+    }
+    div.appendChild(actions); box.appendChild(div);
+  }
+  for (const input of box.querySelectorAll('.rename'))
+    input.onchange = (e) => post('/designer/rename', {profile_name: working.profile,
+      variant_id: e.target.dataset.id, label: e.target.value});
+}
+
+/* ---------------- saved profile cards + audition ---------------- */
+
+function renderProfiles(){
+  const grid = $('profiles-grid'); grid.innerHTML = '';
+  for (const p of details){
+    const card = document.createElement('div');
+    card.className = 'card' + (p.active ? ' active-voice' : '');
+    const speaker = p.mode === 'voice_design' || p.mode === 'voice_design_then_clone'
+      ? 'identidad diseñada' : (p.speaker || 'por defecto');
+    const modeLabel = {['built-in']:'integrada', voice_design:'VoiceDesign',
+      voice_design_then_clone:'clon (diseño)', reference_clone:'clon (referencia)'}[p.mode] || p.mode;
+    card.innerHTML = `
+      <div class="name">${p.name}
+        ${p.active ? '<span class="tag active">ACTIVA</span>' : ''}
+        ${p.available ? '' : '<span class="tag off">motor no disponible</span>'}</div>
+      <div class="facts">
+        <span class="tag">${p.engine}</span>
+        <span class="tag mode">${modeLabel}</span>
+        <span class="tag">${p.language}</span>
+        <span class="tag">${speaker}</span>
+        <span class="tag">${String(p.model).split('/').pop()}</span>
+      </div>`;
+    const actions = document.createElement('div'); actions.className = 'actions';
+    const audBox = document.createElement('div');
+    for (const [label, fn, cls] of [
+      ['▶ Probar voz', () => toggleAudition(p, card, audBox), ''],
+      ['Activar para Fifi', () => activate(p.name), 'primary'],
+      ['Detalles', () => showDetails(p), ''],
+    ]){
+      const b = document.createElement('button'); b.textContent = label; if (cls) b.className = cls;
+      b.onclick = fn; actions.appendChild(b);
+    }
+    if (p.deletable){
+      const del = document.createElement('button'); del.textContent = 'Eliminar'; del.className = 'danger';
+      del.onclick = async () => {
+        if (!confirm(`¿Eliminar el perfil ${p.name}? Se borra su diseño y su referencia. Los perfiles integrados no se pueden eliminar.`)) return;
+        const r = await api(`/profiles/${p.name}`, {method:'DELETE'});
+        status(r.status === 'ok' ? `Perfil ${p.name} eliminado.` : r.message, r.status === 'ok' ? 'ok' : 'err');
+        refresh();
+      };
+      actions.appendChild(del);
+    }
+    card.appendChild(actions); card.appendChild(audBox); grid.appendChild(card);
+  }
+  const names = details.map(p => p.name);
+  fill($('cmp-a'), names, false); fill($('cmp-b'), names, false);
+  if (!$('cmp-text').value) $('cmp-text').value = DEFAULT_TEST;
+}
+
+function auditionAudioSrc(r){ return r.audio_url || `/previews/audition/${r.key}`; }
+
+// One shared play/pause control: only ONE preview plays at a time (the global
+// 'play' capture pauses every other <audio>), and each player's button label
+// tracks its own state (Escuchar voz <-> Pausar).
+function renderPlayer(container, src, meta){
+  container.innerHTML = `
+    <audio controls preload="auto" src="${src}"></audio>
+    <div style="display:flex; gap:8px; margin-top:6px">
+      <button class="play-toggle primary">▶ Escuchar voz</button>
+    </div>
+    <div class="stats">${meta || ''}</div>`;
+  const audio = container.querySelector('audio');
+  const toggle = container.querySelector('.play-toggle');
+  toggle.onclick = () => { if (audio.paused) audio.play(); else audio.pause(); };
+  audio.addEventListener('play', () => { toggle.textContent = '⏸ Pausar'; });
+  audio.addEventListener('pause', () => { toggle.textContent = '▶ Escuchar voz'; });
+  audio.addEventListener('ended', () => { toggle.textContent = '▶ Escuchar voz'; });
+  audio.addEventListener('error', () => {
+    container.querySelector('.stats').innerHTML =
+      '<span style="color:var(--err)">No se pudo cargar o decodificar el audio de la preview.</span>';
+  });
+  return audio;
+}
+
+function engineDetailsHtml(r){
+  const requested = r.requested_engine || '?';
+  const used = r.actual_engine || r.engine || '?';
+  const fallback = r.fallback_used
+    ? (r.fallback_reason || `${requested} no disponible`) : 'no';
+  return `Solicitado: <b>${requested}</b> · Utilizado: <b>${used}</b> · Fallback: ${fallback}<br>
+    síntesis: ${r.synthesis_seconds ?? r.seconds}s · audio: ${r.audio_duration_seconds ?? r.duration_seconds}s ·
+    ${r.cache_hit ? '✔ desde caché' : 'recién generada'}`;
+}
+
+function auditionResultHtml(r){
+  // kept for the A/B panel (players rendered via renderPlayer elsewhere)
+  return `<audio controls preload="auto" src="${auditionAudioSrc(r)}"></audio>
+    <div class="stats">${engineDetailsHtml(r)}</div>`;
+}
+
+function toggleAudition(profile, card, box){
+  if (openAudition && openAudition !== box) openAudition.innerHTML = '';
+  openAudition = box;
+  if (box.innerHTML){ box.innerHTML = ''; return; }
+  box.className = 'audition';
+  // Per-profile preview state lives entirely inside THIS card's box:
+  // idle -> generating -> ready_to_play/playing -> (failed). A failure here
+  // never touches any other card's preview.
+  box.innerHTML = `<label>Frase de prueba (no activa la voz)</label>
+    <textarea class="aud-text">${DEFAULT_TEST}</textarea>
+    <div style="display:flex; gap:8px; margin-top:6px; flex-wrap:wrap">
+      <button class="aud-go primary">Generar prueba</button>
+      <button class="aud-force">Regenerar</button>
+      <button class="aud-close">Cerrar</button>
+    </div>
+    <div class="aud-progress muted"></div>
+    <div class="aud-out"></div>`;
+  const progressLine = box.querySelector('.aud-progress');
+  const out = box.querySelector('.aud-out');
+  const run = (force) => {
+    progressLine.textContent = 'Generando prueba…';
+    out.innerHTML = '';
+    runJob('/jobs/profile-preview',
+      {profile: profile.name, text: box.querySelector('.aud-text').value, force},
+      (r) => {
+        progressLine.textContent = '';
+        renderPlayer(out, auditionAudioSrc(r), engineDetailsHtml(r));
+      },
+      (failure) => {
+        progressLine.textContent = '';
+        out.innerHTML = `<span style="color:var(--err)">${
+          failure.user_message || failure.error || 'La prueba falló.'}</span>`;
+      });
+  };
+  box.querySelector('.aud-go').onclick = () => run(false);
+  box.querySelector('.aud-force').onclick = () => run(true);  // bypasses the cache
+  box.querySelector('.aud-close').onclick = () => { box.innerHTML = ''; };
+}
+
+async function activate(name){
+  const r = await post('/profile/select', {profile: name});
+  status(r.status === 'ok' ? `Voz activa: ${name} — Fifi la usará en su próxima respuesta.` : r.message,
+         r.status === 'ok' ? 'ok' : 'err');
+  refresh();
+}
+
+/* ---------------- A/B compare ---------------- */
+
+$('btn-compare').onclick = () => {
+  const a = $('cmp-a').value, b = $('cmp-b').value;
+  if (a === b){ status('Elige dos voces distintas para comparar.', 'err'); return; }
+  $('cmp-results').innerHTML = '';
+  runJob('/jobs/profile-compare', {profile_a: a, profile_b: b, text: $('cmp-text').value},
+    (r) => {
+      const box = $('cmp-results'); box.innerHTML = '';
+      for (const [slot, res] of [['A', r.a], ['B', r.b]]){
+        const div = document.createElement('div'); div.className = 'panel'; div.style.margin = 0;
+        div.innerHTML = `<h2>Voz ${slot} — ${res.profile}</h2>
+          <audio controls preload="auto" src="${auditionAudioSrc(res)}"></audio>
+          <div class="stats muted">motor: ${res.engine}${res.fallback_used ? ' (fallback)' : ''} ·
+            síntesis ${res.seconds}s · ${res.cache_hit ? 'caché' : 'nueva'}</div>`;
+        const btn = document.createElement('button'); btn.className = 'primary';
+        btn.textContent = 'Activar esta voz'; btn.style.marginTop = '8px';
+        btn.onclick = () => activate(res.profile);
+        div.appendChild(btn); box.appendChild(div);
+      }
+    });
+};
+
+/* ---------------- models panel ---------------- */
+
+function modelStateLabel(entry, busy){
+  if (entry.cache === 'not_installed') return 'no instalado';
+  if (entry.loaded) return busy ? 'cargado en GPU · ocupado' : 'cargado en GPU';
+  return 'en caché (sin cargar)';
+}
+async function refreshModels(){
+  const r = await api('/models/status');
+  if (r.status !== 'ok'){ $('models-box').textContent = 'no disponible'; return; }
+  const busy = r.worker === 'busy' || r.worker === 'warming';
+  const gpuInfo = r.gpu && r.gpu.name
+    ? `${r.gpu.name} — VRAM ${r.gpu.used_gb}/${r.gpu.total_gb} GB usada · ${r.gpu.free_gb} GB libre`
+    : 'GPU no detectada';
+  const rows = [
+    `<div class="model-row"><span class="grow"><b>${gpuInfo}</b></span></div>`,
+    `<div class="model-row"><span class="grow">Ollama (LLM de Fifi)</span>
+       <span class="tag">${r.ollama.loaded.length ? r.ollama.loaded.map(m => `${m.name} · ${m.vram_gb} GB`).join(', ') : 'sin modelo cargado'}</span></div>`,
+    `<div class="model-row"><span class="grow">Whisper (STT)</span>
+       <span class="tag">${r.whisper.loaded ? `cargado (${r.whisper.device})` : (r.whisper.reachable ? 'frío' : 'API principal no accesible')}</span></div>`,
+  ];
+  for (const [label, key] of [['Qwen VoiceDesign','voice_design'], ['Qwen Clonación','clone'], ['Kokoro','kokoro']]){
+    const entry = r.voice_lab[key];
+    rows.push(`<div class="model-row"><span class="grow">${label}
+      <span class="muted">(${String(entry.model).split('/').pop()})</span></span>
+      <span class="tag">${modelStateLabel(entry, busy)}</span></div>`);
+  }
+  $('models-box').innerHTML = rows.join('');
+}
+$('btn-models-refresh').onclick = refreshModels;
+$('btn-unload').onclick = async () => {
+  const r = await post('/models/unload', {});
+  status(`Modelos liberados: ${r.unloaded && r.unloaded.length ? r.unloaded.join(', ') : '(ninguno cargado)'} — la caché no se toca.`, 'ok');
+  refreshModels();
+};
+$('btn-warm').onclick = () => {
+  const active = details.find(p => p.active);
+  if (!active){ status('No hay voz activa que calentar.', 'err'); return; }
+  runJob('/jobs/profile-preview', {profile: active.name, text: 'Calentamiento del motor de voz.', force: true},
+    () => { status(`Motor de ${active.name} caliente — la próxima respuesta será inmediata.`, 'ok'); refreshModels(); });
+};
+
+/* ---------------- details modal ---------------- */
+
+function showDetails(p){
+  const dl = [];
+  const add = (k, v) => { if (v !== undefined && v !== null && v !== '') dl.push(`<dt>${k}</dt><dd>${v}</dd>`); };
+  add('Identificador', p.name); add('Motor', p.engine); add('Modelo', p.model);
+  add('Modo', p.mode); add('Idioma', p.language); add('Hablante', p.speaker || '(identidad diseñada)');
+  add('Velocidad', p.speed); add('Cadena de fallback', (p.fallback_chain || []).join(' → '));
+  add('Instrucción de diseño', p.design_instruction);
+  add('Transcripción de referencia', p.reference_text);
+  if (p.authorization && p.authorization.type)
+    add('Autorización', p.authorization.type === 'synthetic'
+      ? 'sintética (voz diseñada, sin persona real)' : `externa — ${p.authorization.statement || ''}`);
+  add('Procedencia', JSON.stringify(p.provenance));
+  add('Creado', p.created); add('Actualizado', p.updated);
+  add('Disponible', p.available ? 'sí' : `no — ${p.availability_reason}`);
+  $('modal').innerHTML = `<h2 style="margin-top:0">Detalles — ${p.name}
+      ${p.active ? '<span class="tag active">ACTIVA</span>' : ''}</h2>
+    <dl>${dl.join('')}</dl>
+    <div style="display:flex; gap:8px; flex-wrap:wrap">
+      <button class="primary" onclick="activate('${p.name}'); closeModal()">Activar para Fifi</button>
+      <button onclick="closeModal(); regenTest('${p.name}')">Regenerar prueba</button>
+      <button onclick="closeModal()">Cerrar</button>
+    </div>`;
+  $('modal').style.display = 'block'; $('modal-back').style.display = 'block';
+}
+function closeModal(){ $('modal').style.display = 'none'; $('modal-back').style.display = 'none'; }
+function regenTest(name){
+  runJob('/jobs/profile-preview', {profile: name, text: DEFAULT_TEST, force: true},
+    (r) => status(`Prueba regenerada para ${name} (motor ${r.engine}, ${r.seconds}s).`, 'ok'));
+}
+
+/* ---------------- reference clone + refresh loop ---------------- */
+
+$('btn-reference').onclick = async () => {
+  const file = $('r-file').files[0];
+  if (!file) return status('Selecciona un archivo .wav de referencia.', 'err');
+  const form = new FormData();
+  form.append('profile_name', $('r-name').value.trim());
+  form.append('language', $('f-language').value || 'es');
+  form.append('transcript', $('r-transcript').value);
+  form.append('authorization_statement', $('r-auth').value);
+  form.append('file', file);
+  const r = await api('/designer/reference', {method:'POST', body: form});
+  status(r.status === 'ok' ? `Clon ${r.profile.name} congelado.` : r.message,
+         r.status === 'ok' ? 'ok' : 'err');
+  refresh();
+};
+
+async function refresh(light=false){
+  try {
+    const [designerState, det, health] = await Promise.all([
+      api('/designer'), api('/profiles/details'), api('/health'),
+    ]);
+    // A stale worker (old code) 404s the new endpoints — that is a VERSION
+    // problem, never "idle with no profiles". Detect it before rendering.
+    setCompat(health.api_build === UI_BUILD);
+    if (health.api_build !== UI_BUILD || det.__http >= 400){
+      const pill = $('worker-pill');
+      pill.textContent = 'worker: versión distinta'; pill.className = 'pill err';
+      return;
+    }
+    state = designerState; details = det.profiles || [];
+    const worker = health.worker || 'desconocido';
+    const pill = $('worker-pill');
+    pill.textContent = `worker: ${worker}`;
+    pill.className = 'pill ' + (worker === 'idle' ? 'ok' : (worker === 'degraded' ? 'err' : 'busy'));
+    $('active-banner').textContent = 'voz activa: ' + (det.active || '(ninguna)');
+    if (!$('f-mode').options.length){
+      fill($('f-mode'), state.modes.filter(m => m !== 'reference_clone' && m !== 'builtin_speaker'), false);
+      $('f-mode').value = state.default_mode;
+      fill($('f-language'), state.options.language, false);
+      for (const key of ['age','gender','timbre','pitch','energy','speed','accent','emotion','personality'])
+        fill($('f-'+key), state.options[key]);
+      $('f-preview').value = state.default_preview_text;
+    }
+    renderProfiles();
+    if (!light){
+      working = state.working.length && !state.working[state.working.length-1].frozen
+        ? state.working[state.working.length-1] : working;
+      renderVariants();
+      refreshModels();
+      api('/ready').then(r => setStoreBanner(r.profile_store));
+    }
+  } catch (e) {
+    $('worker-pill').textContent = 'worker: sin conexión'; $('worker-pill').className = 'pill err';
+  }
+}
+/* ---------------- connection loop (Phase 3D.0.3a hotfix) ---------------- */
+
+function setPill(text, cls){
+  const pill = $('worker-pill');
+  pill.textContent = `worker: ${text}`;
+  pill.className = 'pill ' + cls;
+}
+
+async function healthTick(){
+  let health = null;
+  try {
+    const h = await api('/health');
+    if (h && h.status === 'ok') health = h;
+  } catch (e) { /* connection refused / timeout */ }
+
+  if (health){
+    const reconnected = conn.failures > 0;
+    conn.failures = 0; conn.delay = 2000;
+    const restarted = conn.instance && health.instance_id &&
+                      conn.instance !== health.instance_id;
+    conn.instance = health.instance_id || conn.instance;
+    setCompat(health.api_build === UI_BUILD);
+    if (health.api_build !== UI_BUILD){
+      setPill('versión distinta', 'err');
+    } else {
+      const worker = health.worker || 'desconocido';
+      setPill(worker, worker === 'idle' ? 'ok' : (worker === 'degraded' ? 'err' : 'busy'));
+    }
+    if (restarted && currentJob){
+      // New instance id ⇒ the old in-memory job is gone, whatever the card said.
+      jobInterrupted('El worker se reinició durante la operación.');
+    }
+    if (reconnected || restarted){ refresh(); adoptActiveJobs(); }
+  } else {
+    conn.failures++;
+    // 1 s while freshly disconnected, then exponential backoff capped at 10 s.
+    conn.delay = conn.failures <= 5 ? 1000
+      : Math.min(10000, Math.round(1000 * Math.pow(1.5, conn.failures - 5)));
+    setPill(conn.failures >= 12 ? 'detenido — reinícialo con voice-restart'
+                                : `reconectando… (intento ${conn.failures})`, 'err');
+  }
+  setTimeout(healthTick, conn.delay);
+}
+
+refresh();
+adoptActiveJobs();
+healthTick();
+setInterval(() => refresh(true), 12000);
+</script>
+</body>
+</html>

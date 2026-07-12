@@ -1,0 +1,19 @@
+{
+  "name": "fifi_luna",
+  "engine": "qwen3_tts",
+  "model": "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+  "language": "es",
+  "speaker": "",
+  "speed": 1.0,
+  "style_instruction": "Voz femenina de adulta joven, timbre aterciopelado, tono medio-grave, energía tranquila, ritmo pausada, acento neutro, emoción serena, personalidad soñadora. como una astrónoma contando historias del cielo nocturno, íntima y curiosa",
+  "sample_rate": 24000,
+  "device": "cuda",
+  "dtype": "bfloat16",
+  "fallback_engine": "kokoro",
+  "provenance": {
+    "source": "voice_designer",
+    "mode": "voice_design_then_clone",
+    "design": "fifi_luna",
+    "phase": "3D.0.2"
+  }
+}

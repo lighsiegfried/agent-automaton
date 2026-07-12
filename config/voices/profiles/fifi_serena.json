@@ -1,0 +1,19 @@
+{
+  "name": "fifi_serena",
+  "engine": "qwen3_tts",
+  "model": "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+  "language": "es",
+  "speaker": "",
+  "speed": 1.0,
+  "style_instruction": "Voz femenina adulta, serena y suave, con un registro grave y aterciopelado; ritmo pausado y respiración tranquila, transmite calma y confianza, como quien lee en voz baja junto a la chimenea.",
+  "sample_rate": 24000,
+  "device": "cuda",
+  "dtype": "bfloat16",
+  "fallback_engine": "kokoro",
+  "provenance": {
+    "source": "built-in",
+    "phase": "3D.0.2",
+    "created": "2026-07-11",
+    "notes": "Identidad diseñada (VoiceDesign): calm, soft adult female, lower pitch."
+  }
+}

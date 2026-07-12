@@ -1,0 +1,13 @@
+# Optional wake-word dependencies (Phase 3D.1). NOT required for the base API —
+# install only to run the wake listener on the Windows host:
+#   pip install -r requirements-wakeword.txt
+#   python scripts/local_runtime.py wake
+#
+# Extends the desktop (push-to-talk) requirements. The custom wake model
+# (models/wake_words/fifi.onnx) is NOT downloaded by these packages or by the
+# app — see models/wake_words/README.md.
+
+-r requirements-desktop.txt   # voice deps + keyboard (hotkeys)
+openwakeword>=0.6.0           # wake word detection (custom "fifi" ONNX model)
+onnxruntime>=1.17             # ONNX inference for openwakeword + Silero VAD
+silero-vad>=5.1               # voice activity detection (capture start/stop)

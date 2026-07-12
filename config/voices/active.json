@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "profile": "fifi_luna",
+  "engine": "qwen3_tts",
+  "fallback_engine": "kokoro",
+  "updated_utc": "2026-07-12T02:05:17+00:00"
+}

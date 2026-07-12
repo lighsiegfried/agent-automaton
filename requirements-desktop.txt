@@ -1,0 +1,9 @@
+# Optional desktop push-to-talk client dependencies (Phase 3C).
+# NOT required for the base API — install only to run scripts/fifi_ptt.py on the
+# Windows host:  pip install -r requirements-desktop.txt
+#
+# Reuses the voice dependencies (STT/TTS/audio capture) and adds a reliable
+# global-hotkey library for push-to-talk.
+
+-r requirements-voice.txt   # faster-whisper, sounddevice, soundfile, numpy, pyttsx3
+keyboard>=0.13.5            # global push-to-talk hotkey (Windows host client)

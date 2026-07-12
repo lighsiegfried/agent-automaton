@@ -30,6 +30,24 @@ from app.tools.registry import INTENT_TOOL_MAP, Tool, registry
 
 log = get_logger(__name__)
 
+# Optional leading invocation forms: "Fifi", "Fifi,", "hey Fifi", "oye Fifi".
+# Stripped for routing only — never from the middle of text, and the original
+# transcription is preserved in the response and command log.
+_GREETING = r"(?:hey|hi|hello|ok|okay|oye|hola)\s+"
+
+
+def strip_invocation_prefix(text: str) -> str:
+    """Remove an optional leading assistant invocation ("Fifi", "hey Fifi", …).
+
+    Anchored at the start only, so "Fifi" appearing mid-sentence is untouched.
+    Returns the original text if stripping would leave nothing.
+    """
+    name = re.escape(get_settings().agent_name)
+    pattern = re.compile(rf"^\s*(?:{_GREETING})?{name}\b[\s,]*", re.IGNORECASE)
+    stripped = pattern.sub("", text, count=1).strip()
+    return stripped or text
+
+
 _ARTICLE = r"(?:the\s+|my\s+|la\s+|el\s+|los\s+|las\s+|mi\s+|un\s+|una\s+)?"
 
 # Checked in order; the first match wins. Capture group 1 becomes the tool
@@ -152,8 +170,8 @@ def _execute(
     )
 
 
-def _dispatch_rules(request: CommandRequest) -> CommandResponse:
-    intent, params = detect_intent(request.text)
+def _dispatch_rules(request: CommandRequest, routing_text: str | None = None) -> CommandResponse:
+    intent, params = detect_intent(routing_text if routing_text is not None else request.text)
     log.info("rule intent=%s params=%s", intent.value, params)
 
     if intent is Intent.UNKNOWN:
@@ -183,8 +201,12 @@ def _dispatch_plan(request: CommandRequest, plan: CommandPlan) -> CommandRespons
 
 
 def handle_command(request: CommandRequest) -> CommandResponse:
+    # Strip a leading "Fifi"/"hey Fifi" for routing only; request.text (the
+    # original transcription) is preserved for the response and the command log.
+    routing_text = strip_invocation_prefix(request.text)
+
     if get_settings().enable_llm_planner:
-        outcome = plan_command(request.text)
+        outcome = plan_command(routing_text)
         if outcome.plan is not None:
             log.info(
                 "llm plan: tool=%s confidence=%.2f", outcome.plan.tool_name, outcome.plan.confidence
@@ -193,10 +215,10 @@ def handle_command(request: CommandRequest) -> CommandResponse:
             response.planner = PlannerSource.LLM_PLANNER
         else:
             log.info("llm planner rejected (%s); falling back to rules", outcome.failure)
-            response = _dispatch_rules(request)
+            response = _dispatch_rules(request, routing_text)
             response.planner = PlannerSource.FALLBACK_ROUTER
     else:
-        response = _dispatch_rules(request)
+        response = _dispatch_rules(request, routing_text)
         response.planner = PlannerSource.RULE_ROUTER
 
     response.assistant_message = generate_assistant_message(

@@ -2,7 +2,11 @@
 # Install with:  pip install -r requirements-voice.txt
 # (faster-whisper downloads its model on first use; GPU is used when available.)
 
-faster-whisper>=1.0     # speech-to-text (app/voice/stt.py)
+faster-whisper>=1.1.0   # speech-to-text (app/voice/stt.py)
+# CTranslate2 4.8.1+ ships the CUDA 12.x / cuBLAS build that supports NVIDIA
+# RTX 50 (Blackwell, sm_120). Older CT2 raises CUBLAS_STATUS_NOT_SUPPORTED on
+# these GPUs. Keep this pin — see docs/SAFETY_RULES.md / ARCHITECTURE.md.
+ctranslate2>=4.8.1      # inference backend for faster-whisper (Blackwell-safe)
 sounddevice>=0.4.7      # microphone capture (scripts/voice_command.py)
 soundfile>=0.12         # WAV read/write for the CLI recorder
 numpy>=1.26             # required by sounddevice/soundfile

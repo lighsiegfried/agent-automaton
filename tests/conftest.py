@@ -1,7 +1,28 @@
-import pytest
+import os
 
-from app.config import get_settings
-from app.tools.registry import load_tools
+# Determinism: the suite is written for the code defaults (optional features
+# OFF), with tests flipping a flag when they need it on. A developer's local
+# .env may enable voice / planner / response for live use — env vars take
+# precedence over .env in pydantic-settings, so pin the defaults here BEFORE the
+# Settings object is ever constructed. This keeps the suite independent of the
+# machine's .env without weakening any test.
+for _flag in (
+    "ENABLE_VOICE",
+    "ENABLE_LLM_PLANNER",
+    "ENABLE_RESPONSE_GENERATOR",
+    "ENABLE_REAL_WINDOWS_TOOLS",
+    "VOICE_SPEAK_COMMAND_RESPONSE",
+    "ENABLE_WAKE_WORD",
+):
+    os.environ[_flag] = "false"
+# The suite is written for the "windows" TTS engine; a developer's .env may
+# select "voice_lab" for live use — pin it like the flags above.
+os.environ["TTS_ENGINE"] = "windows"
+
+import pytest  # noqa: E402
+
+from app.config import get_settings  # noqa: E402
+from app.tools.registry import load_tools  # noqa: E402
 
 load_tools()
 
@@ -30,6 +51,9 @@ def settings():
         s.enable_response_generator,
         s.voice_speak_command_response,
         s.agent_name,
+        s.stt_device,
+        s.stt_compute_type,
+        s.stt_allow_cpu_fallback,
     )
     yield s
     (
@@ -42,6 +66,9 @@ def settings():
         s.enable_response_generator,
         s.voice_speak_command_response,
         s.agent_name,
+        s.stt_device,
+        s.stt_compute_type,
+        s.stt_allow_cpu_fallback,
     ) = saved
 
 

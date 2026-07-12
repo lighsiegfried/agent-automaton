@@ -1,0 +1,19 @@
+{
+  "name": "fifi_nova",
+  "engine": "qwen3_tts",
+  "model": "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+  "language": "es",
+  "speaker": "",
+  "speed": 1.0,
+  "style_instruction": "Voz femenina muy joven, enérgica y moderna, con chispa urbana; tono alto y ágil, entonación expresiva con subidas rápidas, como una streamer entusiasta contando una novedad emocionante.",
+  "sample_rate": 24000,
+  "device": "cuda",
+  "dtype": "bfloat16",
+  "fallback_engine": "kokoro",
+  "provenance": {
+    "source": "built-in",
+    "phase": "3D.0.2",
+    "created": "2026-07-11",
+    "notes": "Identidad diseñada (VoiceDesign): energetic, modern young female."
+  }
+}

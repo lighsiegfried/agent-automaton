@@ -1,5 +1,7 @@
 """Fifi identity layer tests: persona is presentation-only, never safety."""
 
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -28,14 +30,19 @@ def test_default_agent_name_is_fifi():
     assert get_settings().agent_name == "Fifi"
 
 
-def test_wake_word_is_metadata_only():
+def test_wake_word_listening_is_never_started_by_the_api():
+    """Phase 3D.1: a real wake service exists, but only the explicit host-side
+    listener (scripts/fifi_wake.py) uses it — the API never instantiates it,
+    never opens a microphone, and wake listening stays opt-in and off."""
     assert get_settings().wake_word == "fifi"
-    # nothing in the app instantiates a wake word listener
-    from app.voice.wake_word import WakeWordDetector
+    assert get_settings().enable_wake_word is False  # default off
+    import app.main as main_module
+    import app.voice.api as voice_api_module
 
-    detector = WakeWordDetector()
-    assert detector.wake_word == "fifi"
-    assert detector.listen()["simulated"] is True
+    for module in (main_module, voice_api_module):
+        source = Path(module.__file__).read_text(encoding="utf-8")
+        assert "WakeWordService" not in source
+        assert "wake_word import" not in source
 
 
 # --- /identity endpoint ----------------------------------------------------------

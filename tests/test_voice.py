@@ -92,6 +92,36 @@ def test_health_reports_voice_flag(client):
     assert client.get("/health").json()["voice"] is False
 
 
+# --- /voice/status (Phase 3D.1: STT warm reporting) ------------------------------
+
+
+def test_voice_status_disabled_by_default(client, settings):
+    assert settings.enable_voice is False
+    assert client.get("/voice/status").json()["status"] == "disabled"
+
+
+def test_voice_status_reports_warm_state_without_loading(client, voice_on, fake_whisper):
+    fake_whisper("anything")
+    response = client.get("/voice/status").json()
+    assert response["status"] == "ok"
+    assert response["loaded"] is False  # reporting must NOT load the model
+
+    service = get_stt_service()
+    service._model = object()  # pretend prewarm loaded it
+    warm = client.get("/voice/status").json()
+    assert warm["loaded"] is True
+    assert "device" in warm and "compute_type" in warm and "model" in warm
+
+
+def test_voice_status_never_breaks_health(client, voice_on, monkeypatch):
+    """A broken STT stack must not affect /health (or /voice/status itself)."""
+    monkeypatch.setattr(stt_module, "WhisperModel", None)
+    status = client.get("/voice/status").json()
+    assert status["available"] is False
+    health = client.get("/health").json()
+    assert health["status"] == "ok"
+
+
 # --- missing dependency behavior -----------------------------------------------
 
 

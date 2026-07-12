@@ -88,6 +88,31 @@ installed. Voice as a whole is disabled by default (`ENABLE_VOICE=false`);
 there is no always-on microphone and no wake word yet — recording is an
 explicit, user-initiated CLI action.
 
+## Push-to-talk is a client, and confirmation is explicit and short-lived
+
+The Phase 3C push-to-talk client (`scripts/fifi_ptt.py`) records only while a
+hotkey is physically held and posts the clip to `/voice/command` — the same
+path as any typed command. It is a client with no authority: it never sets
+`ENABLE_REAL_WINDOWS_TOOLS`, never enables the planner, and cannot unblock a
+destructive action. It refuses to start unless the API is agent-automaton with
+voice enabled, and it changes no configuration on startup.
+
+Spoken confirmation of a `sensitive` action is deliberately narrow:
+
+- **One** pending command at a time is held in client memory only — never
+  written to disk, so a restart clears it.
+- Approval requires an **exact** phrase (`confirm`, `confirmar`, `yes confirm`,
+  `sí confirmar`); it is never fuzzy-matched, so an approximate or accidental
+  utterance cannot approve anything. On approval the client resends the *exact*
+  original command with `confirm=true` — the action still passes the full safety
+  layer, which decides independently.
+- `cancel` / `cancelar` / `no`, issuing a different command, or a timeout
+  (`PTT_CONFIRM_WINDOW_SECONDS`) all clear the pending command.
+
+This mirrors the API rule that confirmation is per-request with no "always
+allow" state: a voice confirmation approves exactly one command and then expires.
+There is still no always-on microphone and no wake word.
+
 ## Spoken responses are summaries, not decisions
 
 The `assistant_message` (and its spoken form when
@@ -100,6 +125,47 @@ and message, its output is length-capped, chain-of-thought is never requested
 or exposed, and deterministic templates take over on any failure. A blocked
 destructive action is always answered with a clear refusal, and an
 unconfirmed sensitive action always asks for confirmation.
+
+## Docker and LLM services do not change command safety
+
+Support services in Docker (the simulated API, Ollama behind the `llm`
+profile) add compute, not authority. Ollama only ever produces text; that text
+enters the pipeline as an untrusted plan (strictly validated, destructive
+tools rejected) or as a reply to phrase (generated after all decisions are
+final). Whether the model runs in Docker, natively, or not at all, the same
+safety layer gates every action. Containers cannot reach the desktop, the
+code requires a Windows host for real execution, and no assistant tool can
+start Docker, run shell commands, or modify Compose files — the tool surface
+is fixed and tested. GPU acceleration is a performance property only: whether
+Ollama runs on the GPU, the CPU (explicit `ALLOW_CPU_OLLAMA=true` opt-in), or
+not at all, command permissions, confirmation rules, and blocked actions are
+identical. The unattended smoke tests force
+`ENABLE_REAL_WINDOWS_TOOLS=false` and refuse to test an API that reports real
+tools enabled.
+
+## Starting the runtime does not change tool permissions
+
+`scripts/local_runtime.py` (Phase 3B.7) is an orchestrator, not an authority.
+`start`/`stop`/`restart`/`status`/`smoke` decide only *where* processes run —
+Dockerized Ollama as a support service, the FastAPI server on the Windows host —
+never *what* the assistant is permitted to do:
+
+- The host API inherits its configuration from `.env`. The runtime manager does
+  not set `ENABLE_REAL_WINDOWS_TOOLS`, does not enable the planner or any tool,
+  and cannot unblock a destructive action. Whatever safety posture `.env`
+  describes is exactly what runs; simulated-by-default stays the default.
+- Real Windows tools are never enabled in Docker: the only container the runtime
+  starts is `ollama` (profile `llm`), which has no path to the desktop, and
+  `real_windows_tools_enabled()` still requires a Windows host.
+- GPU vs CPU is a performance choice only — CPU inference remains an explicit
+  `ALLOW_CPU_OLLAMA=true` opt-in and changes no permission, confirmation, or
+  block.
+- `stop` never deletes models or Docker volumes and, by default, leaves Ollama
+  running; it only terminates the host API process the script itself started.
+
+The safety layer, tool registry, allowlists, confirmation rules, and the
+unconditional destructive block are identical whether the stack was started by
+this script, by hand, or not at all.
 
 ## Persona never changes safety
 

@@ -12,6 +12,33 @@ venv/
 storage/*
 !storage/.gitkeep
 
+# Local persistent runtime state and logs (Phase 3B.7) — never committed
+# (already covered by storage/* above; listed explicitly for clarity)
+storage/runtime/
+storage/logs/
+
+# Wake-word models (Phase 3D.1) — local artifacts, never downloaded, never
+# committed. The README in that folder documents how to provide fifi.onnx.
+models/wake_words/*.onnx
+
+# Voice Lab (Phase 3D.0) — isolated environment: nested venv, its own .env,
+# downloaded models/caches, generated audio, and logs are never committed.
+# The shared profiles in config/voices/ ARE committed.
+voice_lab/.venv/
+voice_lab/.env
+voice_lab/models/*
+!voice_lab/models/.gitkeep
+voice_lab/storage/*
+!voice_lab/storage/previews
+voice_lab/storage/previews/*
+!voice_lab/storage/previews/.gitkeep
+!voice_lab/storage/cache
+voice_lab/storage/cache/*
+!voice_lab/storage/cache/.gitkeep
+!voice_lab/storage/logs
+voice_lab/storage/logs/*
+!voice_lab/storage/logs/.gitkeep
+
 # Tooling
 .pytest_cache/
 .mypy_cache/

@@ -1,18 +1,99 @@
-# Optional support service: runs the API in SIMULATED mode only.
+# Optional support services ONLY.
 #
 # Docker CANNOT control the Windows desktop — containers have no access to the
 # user session, windows, keyboard, mouse, or installed apps. Real automation
-# always runs directly on the Windows host via scripts/run_dev.ps1.
+# always runs directly on the Windows host; the code enforces this too
+# (real_windows_tools_enabled() requires a Windows host).
 # See docs/ARCHITECTURE.md ("Windows host vs Docker").
 #
 # Convention: this file is named compose.yml, never docker-compose.yml.
+#
+# Services:
+#   api          — the FastAPI app in SIMULATED mode (default profile)
+#   ollama       — local LLM inference for the planner/response generator
+#                  (profile "llm": docker compose --profile llm up -d ollama)
+#   model-keeper — keeps the configured model loaded in Ollama (Phase 3D.1):
+#                  after any Ollama restart it re-warms the model with
+#                  keep_alive=-1 so Fifi never answers from a cold GPU.
 
 services:
   api:
     build: .
+    # Profile-gated (Phase 3D.0.1): an implicit `docker compose up -d` used to
+    # start this simulated API on port 8000, shadowing the REAL host API and
+    # confusing the runtime manager. Opt in explicitly when you want it:
+    #   docker compose --profile sim up -d api
+    profiles:
+      - sim
     ports:
       - "8000:8000"
     environment:
       # Hard-pinned: real execution is impossible in a container anyway
       # (the code also requires a Windows host), but be explicit.
       ENABLE_REAL_WINDOWS_TOOLS: "false"
+
+  ollama:
+    image: ollama/ollama:latest
+    profiles:
+      - llm
+    # Persistent local runtime (Phase 3B.7): keep Ollama up across reboots so
+    # Fifi's LLM backend is always ready. Models survive in the named volume;
+    # scripts/local_runtime.py stop leaves this running by default.
+    restart: unless-stopped
+    ports:
+      # localhost only — never exposed to the network
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      # Persistent warm runtime (Phase 3D.1): one model, loaded once, kept in
+      # VRAM forever. -1 disables idle unloading; single model / no parallel
+      # requests keeps the 7B planner+response model resident on the 16 GB GPU.
+      OLLAMA_KEEP_ALIVE: "-1"
+      OLLAMA_MAX_LOADED_MODELS: "1"
+      OLLAMA_NUM_PARALLEL: "1"
+    # GPU-first by default (Docker Desktop + WSL2 + NVIDIA driver). If the GPU
+    # is unavailable, `up` fails loudly — CPU inference is opt-in only via
+    # ALLOW_CPU_OLLAMA=true, enforced by scripts/docker_llm.py.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # Tiny watchdog (Phase 3D.1): re-warms the configured model after an Ollama
+  # restart so no manual interaction is ever needed. It only ever calls the
+  # Ollama HTTP API (/api/ps, /api/generate) — it cannot touch volumes, models
+  # on disk, or the Windows host.
+  model-keeper:
+    image: curlimages/curl:8.11.1
+    profiles:
+      - llm
+    restart: unless-stopped
+    depends_on:
+      - ollama
+    environment:
+      KEEPER_MODEL: ${LLM_PLANNER_MODEL:-qwen2.5:7b}
+      KEEPER_CHECK_SECONDS: ${MODEL_KEEPER_CHECK_SECONDS:-60}
+      KEEPER_OLLAMA_URL: http://ollama:11434
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "model-keeper: keeping $$KEEPER_MODEL loaded (check every $${KEEPER_CHECK_SECONDS}s)"
+        while true; do
+          if ! curl -sf "$$KEEPER_OLLAMA_URL/api/ps" | grep -q "\"name\":\"$$KEEPER_MODEL\""; then
+            echo "model-keeper: $$KEEPER_MODEL is not loaded — warming with keep_alive=-1"
+            curl -sf -X POST "$$KEEPER_OLLAMA_URL/api/generate" \
+              -H "Content-Type: application/json" \
+              -d "{\"model\":\"$$KEEPER_MODEL\",\"keep_alive\":-1}" > /dev/null \
+              || echo "model-keeper: warm request failed (ollama may still be starting)"
+          fi
+          sleep "$$KEEPER_CHECK_SECONDS"
+        done
+
+volumes:
+  ollama-models:

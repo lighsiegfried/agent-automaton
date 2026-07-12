@@ -1,0 +1,19 @@
+{
+  "name": "fifi_professional",
+  "engine": "qwen3_tts",
+  "model": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+  "language": "en",
+  "speaker": "Serena",
+  "speed": 1.0,
+  "style_instruction": "Clear, composed, professional assistant voice; confident but not stiff.",
+  "sample_rate": 24000,
+  "device": "cuda",
+  "dtype": "bfloat16",
+  "fallback_engine": "windows_sapi",
+  "provenance": {
+    "source": "built-in",
+    "phase": "3D.0.2",
+    "created": "2026-07-11",
+    "notes": "Qwen3-TTS CustomVoice premium timbre 'Serena' styled by instruction."
+  }
+}

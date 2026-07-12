@@ -88,6 +88,45 @@ Copy-Item .env.example .env
 
 The API starts at `http://127.0.0.1:8000` (interactive docs at `/docs`).
 
+## Local persistent runtime
+
+For the full local stack in one command, use the runtime manager. It starts
+**Dockerized Ollama** (GPU-first, a persistent support service) and the
+**FastAPI server on the Windows host** (never in a container), then checks that
+both are healthy:
+
+```powershell
+.venv\Scripts\python.exe scripts\local_runtime.py start    # Ollama (Docker) + API (host)
+.venv\Scripts\python.exe scripts\local_runtime.py status   # what is / isn't ready
+.venv\Scripts\python.exe scripts\local_runtime.py stop      # stop the host API; Ollama stays up
+```
+
+`status` shows Docker availability, the Ollama container state, GPU detection
+and name, the configured model and whether it is present, whether the API is
+running, and Fifi's identity:
+
+```
+=== Fifi local runtime: status ===
+Docker available: True
+Ollama container: running
+GPU detected    : True
+GPU name        : NVIDIA GeForce RTX 5060 Ti
+Configured model: qwen2.5:7b
+Model available : True
+API running     : False
+Fifi identity   : (API not running)
+```
+
+`start` requires the GPU by default (CPU inference only with an explicit
+`ALLOW_CPU_OLLAMA=true`), and `--no-ollama` starts just the host API. `stop`
+terminates only the API process this script started and **never deletes models
+or Docker volumes**; Ollama keeps running unless you pass `--stop-ollama` (or
+set `RUNTIME_KEEP_OLLAMA_RUNNING=false`). `restart` does both; `smoke` runs the
+unattended LLM smoke test. Starting the runtime changes only *where* things run,
+never the safety layer or tool permissions (see
+[docs/SAFETY_RULES.md](docs/SAFETY_RULES.md)). It is a Python script on purpose —
+machine-wide `AllSigned` policy blocks unsigned `.ps1` files.
+
 ## Try it
 
 Health check and identity:
@@ -220,6 +259,40 @@ Text-to-speech (`POST /voice/speak`, and the `speak` tool) uses Windows SAPI
 via pyttsx3 when installed, and simulates otherwise — a missing TTS engine
 never breaks the API. No wake word yet; recording is explicit.
 
+## Push-to-talk (Phase 3C, Windows host)
+
+Talk to Fifi by holding a key. `scripts/fifi_ptt.py` is a host-only client:
+hold the hotkey, speak, release — it records a 16 kHz mono clip, sends it to
+`/voice/command`, and prints the transcription, intent, safety status, planner
+path and Fifi's reply (the API speaks it when `VOICE_SPEAK_COMMAND_RESPONSE=true`).
+
+```powershell
+# install the desktop deps (reuses the voice deps + a global-hotkey library)
+.venv\Scripts\python.exe -m pip install -r requirements-desktop.txt
+
+# set ENABLE_VOICE=true in .env, start the runtime, then launch push-to-talk
+.venv\Scripts\python.exe scripts\local_runtime.py start
+.venv\Scripts\python.exe scripts\local_runtime.py ptt
+```
+
+Hold **`Ctrl+Alt+Space`** (configurable via `PTT_HOTKEY`) to talk; release to
+send; **Esc** cancels the current recording. Recordings are capped at
+`PTT_MAX_SECONDS` and clips shorter than `PTT_MIN_SECONDS` are ignored.
+
+**Sensitive actions need a spoken confirmation.** When a command comes back as
+`needs_confirmation`, the client remembers exactly one pending command and waits
+`PTT_CONFIRM_WINDOW_SECONDS`. Say **`confirm`** (or `confirmar` / `yes confirm` /
+`sí confirmar`) to resend that exact command approved; say **`cancel`**
+(`cancelar` / `no`), issue a different command, or let it time out to drop it.
+Matching is exact (never fuzzy), the pending command lives only in memory (a
+restart clears it), and the client never changes any safety setting. There is
+still no always-on microphone and no wake word — the mic is live only while the
+key is held.
+
+`local_runtime.py status` shows whether the desktop dependencies are installed
+and whether the API has voice enabled. Push-to-talk is never auto-started by
+`start` — it is always an explicit `ptt` launch.
+
 ## Assistant replies (Phase 3B)
 
 Every `/command` and `/voice/command` response now includes an
@@ -251,6 +324,56 @@ control the Windows desktop (no user session, windows, keyboard, or apps), and
 the code additionally requires a Windows host for real execution. Use this only
 as a support service; real automation always runs via `.\scripts\run_dev.ps1`.
 
+## Optional Ollama via Docker
+
+`compose.yml` includes an `ollama` service behind the `llm` profile (so plain
+`docker compose up` never starts it). It binds to `127.0.0.1:11434` only and
+stores models in the named volume `ollama-models`.
+
+```powershell
+# start Ollama, wait for it, pull the configured model, run the LLM smoke test:
+.venv\Scripts\python.exe scripts\docker_llm.py
+
+# or manage it manually:
+docker compose --profile llm up -d ollama
+docker compose --profile llm logs ollama
+docker compose --profile llm down
+```
+
+The unattended smoke test also works against a natively installed Ollama:
+
+```powershell
+.venv\Scripts\python.exe scripts\llm_smoke.py
+```
+
+It checks `/health` and `/identity`, verifies Ollama, pulls
+`LLM_PLANNER_MODEL` if missing, starts the API with the planner and response
+generator enabled (simulated tools only — it forces
+`ENABLE_REAL_WINDOWS_TOOLS=false` and *refuses* to test an API that reports
+real tools enabled), sends bilingual commands including a destructive attempt
+that must not execute, and prints a pass/fail report. These are Python scripts
+on purpose — machine-wide `AllSigned` policy blocks unsigned `.ps1` files.
+
+### GPU-first (CPU is opt-in only)
+
+Dockerized Ollama **requires the NVIDIA GPU by default**: the service carries
+a `deploy.resources.reservations.devices` NVIDIA reservation, and
+`scripts/docker_llm.py` verifies GPU visibility *inside* the container
+(`docker exec … nvidia-smi`, with an Ollama-log fallback) before running any
+inference. If no GPU is visible it exits with a checklist instead of silently
+crawling on CPU. To deliberately allow slow CPU inference, set
+`ALLOW_CPU_OLLAMA=true` in `.env` — the script then continues with a warning.
+
+Troubleshooting GPU passthrough (Windows / Docker Desktop / WSL2):
+
+1. Install the latest NVIDIA Windows driver (includes the WSL2 CUDA driver).
+2. Update WSL2: `wsl --update`
+3. Docker Desktop → Settings → General → "Use the WSL 2 based engine".
+4. Verify passthrough works at all: `docker run --rm --gpus all ubuntu nvidia-smi`
+5. Recreate the service: `docker compose --profile llm up -d --force-recreate ollama`
+6. A `could not select device driver "nvidia"` error from compose means steps
+   1–3 are not complete.
+
 ## Configuration
 
 Copy `.env.example` to `.env` and adjust as needed:
@@ -281,6 +404,18 @@ Copy `.env.example` to `.env` and adjust as needed:
 | `RESPONSE_MODEL`       | `qwen2.5:7b`             | Model for reply phrasing             |
 | `RESPONSE_TIMEOUT_SECONDS` | `15`                 | Reply generation timeout             |
 | `VOICE_SPEAK_COMMAND_RESPONSE` | `false`          | Speak replies after /voice/command   |
+| `API_HOST`             | `127.0.0.1`              | Host the runtime binds the API to     |
+| `API_PORT`             | `8000`                   | Port the runtime binds the API to     |
+| `RUNTIME_AUTO_START_OLLAMA` | `true`              | `start` also brings up Docker Ollama  |
+| `RUNTIME_REQUIRE_GPU`  | `true`                   | Require GPU (CPU needs `ALLOW_CPU_OLLAMA`) |
+| `RUNTIME_KEEP_OLLAMA_RUNNING` | `true`            | `stop` leaves Ollama running          |
+| `ENABLE_PUSH_TO_TALK`  | `false`                  | Push-to-talk client opt-in (metadata) |
+| `PTT_HOTKEY`           | `ctrl+alt+space`         | Global hold-to-talk hotkey            |
+| `PTT_MAX_SECONDS`      | `20`                     | Max recording length (hard cap)       |
+| `PTT_MIN_SECONDS`      | `0.4`                    | Clips shorter than this are ignored   |
+| `PTT_CONFIRM_WINDOW_SECONDS` | `30`               | Spoken-confirmation validity window   |
+| `PTT_AUDIO_FEEDBACK`   | `true`                   | Beep on record start/stop             |
+| `PTT_INPUT_DEVICE`     | `default`                | Microphone device for push-to-talk    |
 
 ## Project layout
 

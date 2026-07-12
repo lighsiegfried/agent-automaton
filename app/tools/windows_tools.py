@@ -66,18 +66,75 @@ _APP_COMMANDS: dict[str, str] = {
 # Environment variables whose directories (and everything inside) are refused.
 _BLOCKED_ROOT_ENV_VARS = ("SystemRoot", "ProgramFiles", "ProgramFiles(x86)", "ProgramData")
 
+# Filler words dropped before matching a known-folder phrase, so that
+# "(mi) carpeta de descargas" / "my downloads folder" reduce to the alias word.
+# These are NEVER treated as path components.
+_FOLDER_FILLERS = frozenset(
+    {"de", "del", "la", "el", "los", "las", "mi", "mis", "my", "the", "a", "folder",
+     "carpeta", "carpetas"}
+)
+
+# Alias word -> canonical Windows known folder under Path.home(). "" means home.
+_KNOWN_FOLDER_WORDS: dict[str, str] = {
+    "home": "", "inicio": "",
+    "downloads": "Downloads", "descargas": "Downloads",
+    "documents": "Documents", "documentos": "Documents",
+    "desktop": "Desktop", "escritorio": "Desktop",
+    "pictures": "Pictures", "imagenes": "Pictures", "imágenes": "Pictures",
+    "music": "Music", "musica": "Music", "música": "Music",
+    "videos": "Videos", "vídeos": "Videos",
+}
+
+
+def normalize_known_folder(raw: str) -> str | None:
+    """Map a natural-language folder phrase to a canonical home subfolder.
+
+    Returns the subfolder name (e.g. "Downloads", or "" for home) when the
+    phrase — ignoring filler words like de/la/mi/folder/carpeta — names exactly
+    one known folder. Returns None for anything else (arbitrary text), so it is
+    never turned into a relative path. Deterministic and offline.
+    """
+    tokens = [t for t in re.split(r"[\s,]+", (raw or "").strip().lower()) if t]
+    core = [t for t in tokens if t not in _FOLDER_FILLERS]
+    knowns = [_KNOWN_FOLDER_WORDS[t] for t in core if t in _KNOWN_FOLDER_WORDS]
+    unknown = [t for t in core if t not in _KNOWN_FOLDER_WORDS]
+    if len(knowns) == 1 and not unknown:
+        return knowns[0]
+    return None
+
+
+def _is_explicit_path(raw: str) -> bool:
+    """An explicit filesystem path (absolute, home-relative, or drive-qualified)
+    — as opposed to arbitrary natural-language text."""
+    if raw.startswith("~") or raw.startswith("/") or raw.startswith("\\"):
+        return True
+    if len(raw) >= 2 and raw[1] == ":":  # drive letter, e.g. C:
+        return True
+    return Path(raw).expanduser().is_absolute()
+
 
 def validate_folder(raw: str) -> tuple[Path | None, str | None]:
-    """Resolve a folder request to (path, None) or (None, rejection reason)."""
+    """Resolve a folder request to (path, None) or (None, rejection reason).
+
+    Deterministic known folders (Downloads/Documents/Desktop/... in ES/EN) map
+    under Path.home() and override a messy LLM/fallback argument. Explicit paths
+    go through the normal safety checks. Arbitrary natural-language text is
+    refused with a clarification — it is never resolved relative to the CWD.
+    """
     raw = (raw or "").strip().strip('"')
     if not raw:
         return Path.home(), None
 
-    alias = FOLDER_ALIASES.get(raw.lower())
-    if alias is not None:
-        path = Path.home() / alias
-    else:
+    known = normalize_known_folder(raw)
+    if known is not None:
+        path = Path.home() / known
+    elif _is_explicit_path(raw):
         path = Path(raw).expanduser()
+    else:
+        return None, (
+            f"I'm not sure which folder {raw!r} means. Say a known folder like "
+            "'downloads', 'documents' or 'desktop', or give a full path."
+        )
 
     try:
         path = path.resolve()

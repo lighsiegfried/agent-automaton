@@ -1,0 +1,13 @@
+# OPTIONAL Qwen3-TTS dependencies (Phase 3D.0.2) — never installed by default.
+# The qwen3_tts engine stays dormant until you explicitly opt in:
+#   python voice_lab/scripts/setup.py --with-qwen
+#
+# qwen-tts is the official Qwen3-TTS runtime (Qwen3TTSModel: VoiceDesign /
+# CustomVoice / voice clone). Model weights (~3.4 GB per 1.7B variant) download
+# on first load into voice_lab/models — never committed. flash-attn is NOT
+# used (no prebuilt Windows wheels); the model runs with default attention.
+#
+# A Qwen failure can never affect Kokoro or the main agent — the worker falls
+# back: selected engine -> kokoro -> windows_sapi.
+
+qwen-tts>=0.1

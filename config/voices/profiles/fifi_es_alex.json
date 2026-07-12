@@ -1,0 +1,19 @@
+{
+  "name": "fifi_es_alex",
+  "engine": "kokoro",
+  "model": "hexgrad/Kokoro-82M",
+  "language": "es",
+  "speaker": "em_alex",
+  "speed": 1.0,
+  "style_instruction": "",
+  "sample_rate": 24000,
+  "device": "cuda",
+  "dtype": "float16",
+  "fallback_engine": "windows_sapi",
+  "provenance": {
+    "source": "built-in",
+    "phase": "3D.0.1",
+    "created": "2026-07-11",
+    "notes": "Contraste de tono: voz masculina española (Alex)."
+  }
+}
