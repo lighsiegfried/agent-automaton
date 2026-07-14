@@ -217,6 +217,14 @@ def whisper_state() -> dict[str, Any]:
     }
 
 
+def _hf_cache_root() -> Path:
+    """HF cache root — HF_HOME when set (the Docker volume mount at /models/hf),
+    else the isolated voice_lab/models/hf. Lets the containerized worker see the
+    seeded volume cache while the host worker keeps its local path."""
+    env = os.environ.get("HF_HOME")
+    return Path(env) if env else (MODELS_DIR / "hf")
+
+
 def model_cache_status(model_id: str) -> str:
     """'cached' | 'not_installed' — does the HF cache already hold this model?
 
@@ -226,7 +234,8 @@ def model_cache_status(model_id: str) -> str:
     if not model_id or "/" not in model_id:
         return "cached"  # engine-local ids (kokoro voices, sapi) need no download
     slug = "models--" + model_id.replace("/", "--")
-    for hub in (MODELS_DIR / "hf" / "hub", MODELS_DIR / "hf"):
+    root = _hf_cache_root()
+    for hub in (root / "hub", root):
         snapshot_root = hub / slug / "snapshots"
         if snapshot_root.is_dir():
             for snapshot in snapshot_root.iterdir():
@@ -238,7 +247,7 @@ def model_cache_status(model_id: str) -> str:
 def cache_dir_size_bytes() -> int:
     """Total bytes under the HF cache — used to show real download movement."""
     total = 0
-    root = MODELS_DIR / "hf"
+    root = _hf_cache_root()
     if not root.is_dir():
         return 0
     for path in root.rglob("*"):

@@ -3,8 +3,15 @@
 No GPU, no downloads: whatever voices Windows ships. Also the default
 `fallback_engine` for every neural profile, so a broken neural stack always
 degrades to a working voice instead of silence.
+
+Host-only by design: SAPI is a Windows facility. Inside the Linux Voice Lab
+container it is DISABLED (non-Windows host, or VOICE_LAB_DISABLE_SAPI set), so
+the container's fallback chain terminates at Kokoro instead of a broken/absent
+SAPI. The Windows fallback the main API relies on lives on the HOST, unaffected.
 """
 
+import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +35,13 @@ class WindowsSapiEngine(TtsEngine):
         self._pyttsx3 = None
 
     def available(self) -> tuple[bool, str]:
+        # Disabled off Windows (e.g. the Linux container) or when explicitly
+        # turned off — SAPI is a host-only facility. The chain falls to Kokoro.
+        disabled = os.environ.get("VOICE_LAB_DISABLE_SAPI", "").strip().lower() in (
+            "1", "true", "yes", "on"
+        )
+        if disabled or sys.platform != "win32":
+            return False, "windows_sapi is host-only (disabled on this worker)"
         try:
             import pyttsx3  # noqa: F401
         except Exception:

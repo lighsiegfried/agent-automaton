@@ -672,11 +672,18 @@ def test_start_never_launches_voice_lab(monkeypatch):
     assert local_runtime.cmd_start(_Args()) == 0
 
 
-def test_voice_lab_never_runs_in_docker():
-    """compose.yml gains no voice service — the worker is host-only."""
+def test_voice_lab_docker_worker_is_contained():
+    """The Voice Lab worker CAN now run in Docker (profile 'voice'), but the
+    container is a contained support service: profile-gated and loopback-only,
+    and it never controls the desktop — host audio playback and Windows SAPI are
+    disabled inside it. Real desktop automation and the Windows TTS fallback
+    stay on the host."""
     compose = (PROJECT_ROOT / "compose.yml").read_text(encoding="utf-8")
-    assert "voice" not in compose.lower()
-    assert "8766" not in compose
+    block = compose.split("\n  voice-lab:", 1)[1].split("\n  voice-model-seed:", 1)[0]
+    assert "- voice" in block                                # profile-gated (opt-in)
+    assert '"127.0.0.1:8766:8766"' in block                  # loopback only
+    assert 'VOICE_LAB_PLAYBACK_ENABLED: "false"' in block    # never touches host audio
+    assert 'VOICE_LAB_DISABLE_SAPI: "true"' in block         # SAPI stays host-only
 
 
 def test_start_voice_lab_process_is_isolated_and_loopback(monkeypatch, tmp_path):

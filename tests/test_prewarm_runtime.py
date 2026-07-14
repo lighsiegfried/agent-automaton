@@ -279,7 +279,13 @@ def test_compose_model_keeper_rewarms_after_restart():
 def test_compose_model_keeper_cannot_touch_volumes_or_host():
     import re
 
-    keeper_block = compose_text().split("model-keeper:", 1)[1].split("volumes:\n", 1)[0]
+    # Bound the keeper block at the next service (voice-lab) so it stays precise
+    # now that model-keeper is no longer the last service in the file. Strip
+    # comment lines — the following service's documentation may mention docker.
+    raw = compose_text().split("model-keeper:", 1)[1].split("\n  voice-lab:", 1)[0]
+    keeper_block = "\n".join(
+        line for line in raw.splitlines() if not line.strip().startswith("#")
+    )
     assert "volumes:" not in keeper_block  # no mounts at all
     assert "docker" not in keeper_block  # no docker socket / CLI
     assert not re.search(r"\brm\b", keeper_block)  # no delete commands

@@ -1,0 +1,8 @@
+{
+  "_comment": "Single source of truth for the Voice Lab model repositories. Both the seeding service (voice-model-seed) and the download service (voice-model-download) read this file, so model identifiers live in configuration and are never duplicated across scripts. These are the exact three repos already present in the local Hugging Face cache (voice_lab/models/hf).",
+  "models": [
+    "hexgrad/Kokoro-82M",
+    "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+    "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign"
+  ]
+}

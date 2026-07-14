@@ -95,5 +95,117 @@ services:
           sleep "$$KEEPER_CHECK_SECONDS"
         done
 
+  # Fifi Voice Lab worker (Phase 3D.x) — the ONLY containerized part of the
+  # Voice Lab. Isolated image (voice_lab/Dockerfile), GPU-enabled with the SAME
+  # NVIDIA reservation as Ollama. Bound to loopback only; the main HOST API
+  # talks to it over http://127.0.0.1:8766 exactly as it does the host worker.
+  # It never touches the microphone/keyboard/mouse or Windows apps: playback and
+  # Windows SAPI are disabled here (host-only), and models load from the seeded
+  # `voice-lab-models` volume — never downloaded, never baked into the image.
+  #   docker compose --profile voice up -d voice-lab
+  voice-lab:
+    build:
+      context: .
+      dockerfile: voice_lab/Dockerfile
+    image: fifi-voice-lab:latest
+    profiles:
+      - voice
+    restart: unless-stopped
+    # Reap child processes and forward signals — torch/CUDA can leave zombies,
+    # which would otherwise block a clean `restart`/`up --force-recreate`.
+    init: true
+    ports:
+      # localhost only — never exposed to the network (mirrors the host worker).
+      - "127.0.0.1:8766:8766"
+    environment:
+      # HF cache -> the mounted volume, so every model load reads the seeded
+      # weights and downloads nothing.
+      HF_HOME: /models/hf
+      HF_HUB_CACHE: /models/hf/hub
+      HUGGINGFACE_HUB_CACHE: /models/hf/hub
+      VOICE_LAB_HOST: 0.0.0.0
+      VOICE_LAB_PORT: "8766"
+      # Never touch host audio devices; the Windows fallback lives in the main
+      # host API, not in this Linux worker.
+      VOICE_LAB_PLAYBACK_ENABLED: "false"
+      VOICE_LAB_DISABLE_SAPI: "true"
+      # Cold loads from the mounted volume (WSL2 filesystem, first read) are
+      # slower than a host SSD, so give the soft model-load timeout more room in
+      # Docker mode — the load is never force-killed, this just stops a healthy
+      # cold load being reported as a timeout.
+      VOICE_LAB_MODEL_LOAD_TIMEOUT_SECONDS: "900"
+      # GPU passthrough, identical to the Ollama service.
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    volumes:
+      # Model weights live ONLY in this named volume after migration.
+      - voice-lab-models:/models/hf
+      # Shared integration state, read-write so profile selection persists to
+      # the host and generated previews/identities stay accessible there.
+      - ./config/voices:/srv/agent-automaton/config/voices
+      - ./voice_lab/storage:/srv/agent-automaton/voice_lab/storage
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8766/health', timeout=5).status==200 else 1)"
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8766"]
+    # Same NVIDIA reservation as Ollama.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # One-shot migration (profile "voice-seed"): copy the existing host HF cache
+  # into the `voice-lab-models` volume WITHOUT the network, so the ~14 GB of
+  # weights are never re-downloaded. The host cache is mounted read-only; the
+  # copy is atomic-marked and idempotent (skips when already seeded).
+  #   docker compose --profile voice-seed up voice-model-seed
+  voice-model-seed:
+    image: python:3.12-slim
+    profiles:
+      - voice-seed
+    # Hard guarantee that the seed can never hit the network.
+    network_mode: none
+    volumes:
+      - ./voice_lab/models/hf:/seed/hf:ro          # existing host cache (read-only)
+      - voice-lab-models:/models/hf                 # destination volume
+      - ./voice_lab/docker/seed_models.py:/seed/seed_models.py:ro
+      - ./voice_lab/models.json:/config/models.json:ro
+    entrypoint: ["python", "/seed/seed_models.py"]
+
+  # Escape hatch (profile "voice-download"): on a machine with NO local cache to
+  # migrate, download ONLY the missing configured models straight into the
+  # volume using the official Hugging Face cache API. Model ids come from the
+  # shared voice_lab/models.json — never duplicated in code. Reuses the Voice
+  # Lab image (it already has huggingface_hub).
+  #   docker compose --profile voice-download up voice-model-download
+  voice-model-download:
+    build:
+      context: .
+      dockerfile: voice_lab/Dockerfile
+    image: fifi-voice-lab:latest
+    profiles:
+      - voice-download
+    environment:
+      HF_HOME: /models/hf
+      HF_HUB_CACHE: /models/hf/hub
+      HUGGINGFACE_HUB_CACHE: /models/hf/hub
+      VOICE_LAB_MODELS_CONFIG: /config/models.json
+    volumes:
+      - voice-lab-models:/models/hf
+      - ./voice_lab/docker/download_models.py:/download_models.py:ro
+      - ./voice_lab/models.json:/config/models.json:ro
+    entrypoint: ["python", "/download_models.py"]
+
 volumes:
   ollama-models:
+  voice-lab-models:

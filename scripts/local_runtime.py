@@ -67,6 +67,19 @@ VOICE_LAB_BUILD_FILE = VOICE_LAB_DIR / "app" / "build.py"
 # container and the ollama-models volume. We NEVER run `down -v`.
 OLLAMA_STOP = ["docker", "compose", "--profile", docker_llm.COMPOSE_PROFILE, "stop", "ollama"]
 
+# Voice Lab in Docker (Phase 3D.x) — the containerized worker binds the SAME
+# loopback port (127.0.0.1:8766), so the main API and every HTTP command work
+# unchanged whether the worker runs on the host or in this container.
+VOICE_COMPOSE_PROFILE = "voice"
+VOICE_COMPOSE_SERVICE = "voice-lab"
+VOICE_COMPOSE_UP = [
+    "docker", "compose", "--profile", VOICE_COMPOSE_PROFILE, "up", "-d", VOICE_COMPOSE_SERVICE
+]
+# stop (not down) preserves the container and the voice-lab-models volume.
+VOICE_COMPOSE_STOP = [
+    "docker", "compose", "--profile", VOICE_COMPOSE_PROFILE, "stop", VOICE_COMPOSE_SERVICE
+]
+
 
 # --- configuration (env / .env, same source as the other scripts) ----------------
 
@@ -125,6 +138,17 @@ def voice_enabled() -> bool:
 
 def voice_lab_url() -> str:
     return llm_smoke.config_value("VOICE_LAB_URL", "http://127.0.0.1:8766")
+
+
+def voice_lab_runtime() -> str:
+    """Where the Voice Lab worker runs: 'host' (default) or 'docker'.
+
+    In 'docker' mode voice-start/stop/status/warm/ui orchestrate the compose
+    `voice-lab` service instead of a host process; either way the worker answers
+    on the same loopback URL, so warm/preview/ui and the main API are identical.
+    """
+    raw = llm_smoke.config_value("VOICE_LAB_RUNTIME", "host").strip().lower()
+    return "docker" if raw == "docker" else "host"
 
 
 def auto_start_voice_lab() -> bool:
@@ -485,6 +509,45 @@ def stop_owned_worker(out=print) -> bool:
     return stopped
 
 
+def voice_lab_container_id() -> str | None:
+    """Container id of the compose voice-lab service, or None."""
+    try:
+        result = subprocess.run(
+            ["docker", "compose", "--profile", VOICE_COMPOSE_PROFILE, "ps",
+             "-q", VOICE_COMPOSE_SERVICE],
+            cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    cid = (result.stdout or "").strip().splitlines()
+    return cid[0] if cid else None
+
+
+def voice_lab_container_status() -> str:
+    """running / exited / not created for the voice-lab container."""
+    container_id = voice_lab_container_id()
+    if not container_id:
+        return "not created"
+    try:
+        result = subprocess.run(
+            ["docker", "inspect", "-f", "{{.State.Status}}", container_id],
+            cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "unknown"
+    if result.returncode == 0 and result.stdout.strip():
+        return result.stdout.strip()
+    return "unknown"
+
+
+def start_voice_lab_container() -> bool:
+    return subprocess.run(VOICE_COMPOSE_UP, cwd=PROJECT_ROOT).returncode == 0
+
+
+def stop_voice_lab_container() -> bool:
+    return subprocess.run(VOICE_COMPOSE_STOP, cwd=PROJECT_ROOT).returncode == 0
+
+
 def start_voice_lab_process() -> subprocess.Popen | None:
     """Launch the Voice Lab worker with ITS OWN interpreter, loopback only.
 
@@ -493,6 +556,15 @@ def start_voice_lab_process() -> subprocess.Popen | None:
     launcher (run_worker.py) pins voice_lab/ on sys.path itself, so the
     worker resolves the same code and profile store from ANY CWD.
     """
+    # Single-worker guarantee: never start a HOST worker when the runtime is
+    # 'docker' (the container owns port 8766). Prevents two Voice Lab workers.
+    if voice_lab_runtime() == "docker":
+        print(
+            "Voice Lab runtime is 'docker' — refusing to start a HOST worker.\n"
+            "The containerized worker owns port 8766. Use:  docker compose "
+            "--profile voice up -d voice-lab"
+        )
+        return None
     python = voice_lab_python()
     if not python.startswith(str(VOICE_LAB_DIR)):
         print(
@@ -946,6 +1018,49 @@ def _stop_owned_stale_worker(out=print) -> bool:
 
 
 def _voice_lab_up(out=print) -> bool:
+    """Ensure the Voice Lab worker is up, dispatching on VOICE_LAB_RUNTIME.
+
+    'docker' → the compose voice-lab container; 'host' → the isolated venv
+    worker. Both answer on the same loopback URL, so callers (warm/preview/ui)
+    are runtime-agnostic once this returns True."""
+    if voice_lab_runtime() == "docker":
+        return _voice_lab_up_docker(out)
+    return _voice_lab_up_host(out)
+
+
+def _voice_lab_up_docker(out=print) -> bool:
+    """Bring up the containerized worker (profile 'voice'). Single-worker safe:
+    a worker already answering on 8766 is reused, never duplicated."""
+    health = voice_lab_health()
+    if health:
+        out(f"Voice Lab       : already running at {voice_lab_url()} (docker mode)")
+        return True
+    if not docker_available():
+        out(
+            "Voice Lab       : Docker is not available — cannot start the container.\n"
+            "  Start Docker Desktop, or set VOICE_LAB_RUNTIME=host to run on the host."
+        )
+        return False
+    out(f"Starting worker : {VOICE_COMPOSE_SERVICE} container (profile {VOICE_COMPOSE_PROFILE})")
+    if not start_voice_lab_container():
+        out(
+            "Voice Lab       : docker compose failed to start voice-lab.\n"
+            "  docker compose --profile voice logs voice-lab"
+        )
+        return False
+    health = wait_for_voice_lab()
+    if health is None:
+        out(
+            "Voice Lab       : container did not answer /health in time.\n"
+            "  docker compose --profile voice logs voice-lab"
+        )
+        return False
+    out(f"Engines         : {health.get('engines_available')}")
+    out(f"Active profile  : {health.get('active_profile')}")
+    return True
+
+
+def _voice_lab_up_host(out=print) -> bool:
     """Ensure a CURRENT worker is running (voice-start / voice-warm / start).
 
     BUSY IS NOT DOWN: heavy GPU work can make /health slow. If the probe fails
@@ -1148,10 +1263,14 @@ def cmd_voice_preview(args: argparse.Namespace) -> int:
 
 def cmd_voice_status(args: argparse.Namespace) -> int:
     print("=== Fifi local runtime: voice lab status ===")
+    runtime = voice_lab_runtime()
+    print(f"Runtime         : {runtime}")
+    if runtime == "docker":
+        print(f"Container       : {voice_lab_container_status()} ({VOICE_COMPOSE_SERVICE})")
     health = voice_lab_health()
     print(f"Worker          : {'running' if health else 'not running'} ({voice_lab_url()})")
     pid = read_voice_lab_pid()
-    if pid is not None and not health:
+    if runtime == "host" and pid is not None and not health:
         state = "died" if not process_alive(pid) else "alive but /health silent"
         print(f"Owned worker PID: {pid} ({state}) — run 'voice-start' to recover")
     if health:
@@ -1178,8 +1297,16 @@ def cmd_voice_status(args: argparse.Namespace) -> int:
 
 
 def cmd_voice_stop(args: argparse.Namespace) -> int:
-    """Stop the owned Voice Lab worker. Models/caches are never touched."""
+    """Stop the Voice Lab worker. Models/caches/volumes are never touched."""
     print("=== Fifi local runtime: voice lab stop ===")
+    if voice_lab_runtime() == "docker":
+        # stop (not down): the container and voice-lab-models volume survive.
+        if stop_voice_lab_container():
+            print(f"Voice Lab       : stopped the {VOICE_COMPOSE_SERVICE} container.")
+        else:
+            print("Voice Lab       : docker compose stop failed (see output above).")
+        print("Models, caches, volumes, and profiles were not touched.")
+        return 0
     pid = read_voice_lab_pid()
     if pid is None:
         print("Voice Lab       : no PID recorded by this script — nothing to stop.")

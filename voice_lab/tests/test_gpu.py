@@ -12,6 +12,9 @@ def _no_real_probes(monkeypatch):
         "name": "NVIDIA GeForce RTX 5060 Ti", "total_gb": 16.0, "used_gb": 8.0, "free_gb": 8.0,
     })
     monkeypatch.delenv("VOICE_LAB_ALLOW_TEMPORARY_OLLAMA_UNLOAD", raising=False)
+    # Cache detection now honors HF_HOME (Docker points it at the volume). Clear
+    # it so MODELS_DIR-based tests stay deterministic regardless of the shell.
+    monkeypatch.delenv("HF_HOME", raising=False)
 
 
 def test_headroom_ok_when_vram_fits():

@@ -1,10 +1,37 @@
+# Build-context exclusions for BOTH images (root main API + voice_lab/Dockerfile).
+# The Voice Lab image is built from the repo root, so the model cache MUST be
+# excluded here — the ~14 GB of weights enter Docker ONLY through the
+# voice-model-seed service (a volume copy), never the build context.
+
+# Virtualenvs
 .venv/
+voice_lab/.venv/
+
+# VCS / secrets
 .git/
 .env
+voice_lab/.env
+
+# Model weights — never in any build context (seeded into the volume instead)
+models/
+voice_lab/models/
+
+# Runtime state, generated audio, previews, logs
 storage/
+voice_lab/storage/
+*.wav
+*.log
+
+# Python / test caches
 __pycache__/
 *.py[cod]
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+
+# Repo-only tooling not needed in any image
 tests/
 docs/
 scripts/
-.pytest_cache/
+graphify-out/
+graphify-out.zip
