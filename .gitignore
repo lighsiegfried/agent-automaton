@@ -12,14 +12,70 @@ venv/
 storage/*
 !storage/.gitkeep
 
+# Browser automation (Phase 4B): the isolated Chromium profile, screenshots,
+# downloads, traces, and logs are all local — never committed.
+storage/browser/
+
 # Local persistent runtime state and logs (Phase 3B.7) — never committed
 # (already covered by storage/* above; listed explicitly for clarity)
 storage/runtime/
 storage/logs/
 
+# Personal memory (Phase 5A): the local SQLite memory database (+ WAL/SHM
+# sidecars, corruption backups, and JSON exports) is private user data — never
+# committed. Covered by storage/* above; listed explicitly for clarity.
+storage/memory/
+
+# Multi-step tasks (Phase 5B): the local SQLite task database (+ WAL/SHM sidecars
+# and corruption backups) holds private task state — never committed. Covered by
+# storage/* above; listed explicitly for clarity.
+storage/tasks/
+
+# Schedules + reminders (Phase 5C): the local SQLite schedule database (+ WAL/SHM
+# sidecars and corruption backups) holds private schedule state — never committed.
+# Covered by storage/* above; listed explicitly for clarity.
+storage/schedules/
+
+# Activity Center (Phase 5D): the local SQLite event database (+ WAL/SHM sidecars
+# and corruption backups) holds redacted local observability data — never committed.
+# Covered by storage/* above; listed explicitly for clarity.
+storage/activity/
+
+# Knowledge Vault (Phase 6A): the metadata DB, ingested document files, and local
+# vector indexes are PRIVATE user data — never committed. Covered by storage/* above;
+# listed explicitly for clarity.
+storage/knowledge/
+
+# Security (Phase 6B): the security DB holds the SALTED password verifier, lockout
+# counters and elevation/audit state — never committed. Covered by storage/* above;
+# listed explicitly for clarity.
+storage/security/
+
 # Wake-word models (Phase 3D.1) — local artifacts, never downloaded, never
 # committed. The README in that folder documents how to provide fifi.onnx.
 models/wake_words/*.onnx
+# Wake-word install artifacts (Phase 3D.2): the active model's metadata and the
+# versioned backups describe local-only .onnx files — keep them local too.
+models/wake_words/*.metadata.json
+models/wake_words/backups/*
+!models/wake_words/backups/.gitkeep
+
+# Wake-word training workspace (Phase 3D.2) — isolated like voice_lab/: its
+# nested venv, datasets, generated/augmented audio, downloaded backgrounds,
+# model outputs, caches, and reports are ALL local artifacts, never committed.
+# The committed parts are the code (trainer/, scripts/, tests/), config/*.yaml,
+# requirements.txt, .env.example, README.md, and the dataset .gitkeep files.
+wake_training/.venv/
+wake_training/.env
+wake_training/datasets/*/*
+!wake_training/datasets/*/.gitkeep
+wake_training/outputs/*
+!wake_training/outputs/.gitkeep
+wake_training/reports/*
+!wake_training/reports/.gitkeep
+# Third-party generators / downloaded corpora fetched into the workspace.
+wake_training/piper-sample-generator/
+wake_training/.cache/
 
 # Voice Lab (Phase 3D.0) — isolated environment: nested venv, its own .env,
 # downloaded models/caches, generated audio, and logs are never committed.
@@ -50,4 +106,14 @@ Desktop.ini
 .vscode/
 .idea/
 .claude/*
+# graphify skill output — local knowledge-graph artifacts, never committed. NOTE:
+# graphify-out/ and graphify-out.zip were tracked before this rule; untrack them with
+# `git rm -r --cached graphify-out graphify-out.zip` (see docs/RELEASE_AUDIT).
+graphify-out/
+graphify-out/*
+graphify-out.zip
+
+# Release audit backups (Phase 7A) — local backups of user data, never committed.
+backups/
+_live*.py
 

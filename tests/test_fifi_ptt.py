@@ -336,6 +336,22 @@ def test_connect_error_is_labeled_unreachable(tmp_path):
     assert any("not reachable" in m.lower() for m in out)
 
 
+def test_push_to_talk_requests_are_not_wake_mode(tmp_path):
+    """Push-to-talk stays wake=False (Phase 3D.1): only the wake listener flips
+    wake_mode. The flag never affects confirm/safety, only how TTS is voiced."""
+    http = FakeHttp()
+    client, _ = make_client(http=http)
+    wav = tmp_path / "clip.wav"
+    wav.write_bytes(b"RIFFfake")
+    assert client.wake_mode is False  # default
+    client._post_voice_command(str(wav), confirm=False)
+    assert http.posts[-1]["params"] == {"confirm": False, "wake": False}
+    # The wake listener uses the SAME client class with wake_mode=True.
+    client.wake_mode = True
+    client._post_voice_command(str(wav), confirm=False)
+    assert http.posts[-1]["params"] == {"confirm": False, "wake": True}
+
+
 # --- confirmation flow -----------------------------------------------------------
 
 

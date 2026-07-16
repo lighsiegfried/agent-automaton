@@ -58,6 +58,9 @@ class WakeWordService:
         model_path: str | Path | None = None,
         threshold: float | None = None,
         vad_threshold: float | None = None,
+        verifier_enabled: bool | None = None,
+        verifier_path: str | Path | None = None,
+        verifier_threshold: float | None = None,
     ) -> None:
         settings = get_settings()
         self.model_path = resolve_model_path(model_path)
@@ -65,10 +68,30 @@ class WakeWordService:
         self.vad_threshold = (
             settings.vad_threshold if vad_threshold is None else vad_threshold
         )
+        # Optional speaker verifier (Phase 3D.2). Off by default; only consulted
+        # when explicitly enabled AND the verifier file exists at load().
+        self.verifier_enabled = (
+            settings.enable_wake_word_verifier
+            if verifier_enabled is None
+            else verifier_enabled
+        )
+        self.verifier_path = resolve_model_path(
+            verifier_path or settings.wake_word_verifier_path
+        )
+        self.verifier_threshold = (
+            settings.wake_word_verifier_threshold
+            if verifier_threshold is None
+            else verifier_threshold
+        )
         self._oww = None
         self._vad = None
         # Last wake score seen by detect() — for logging/threshold calibration.
         self.last_score: float = 0.0
+
+    @property
+    def verifier_active(self) -> bool:
+        """True only when the verifier is enabled AND its file exists on disk."""
+        return bool(self.verifier_enabled and self.verifier_path.is_file())
 
     @property
     def model_present(self) -> bool:
@@ -89,6 +112,9 @@ class WakeWordService:
             "loaded": self.loaded,
             "threshold": self.threshold,
             "vad_threshold": self.vad_threshold,
+            "verifier_enabled": self.verifier_enabled,
+            "verifier_active": self.verifier_active,
+            "verifier_path": str(self.verifier_path),
         }
 
     def load(self) -> dict[str, Any]:
@@ -119,9 +145,19 @@ class WakeWordService:
 
             # Explicit model list + onnx framework: openWakeWord must load OUR
             # file only, never fetch or substitute a pretrained model.
-            self._oww = Model(
-                wakeword_models=[str(self.model_path)], inference_framework="onnx"
-            )
+            model_kwargs: dict[str, Any] = {
+                "wakeword_models": [str(self.model_path)],
+                "inference_framework": "onnx",
+            }
+            # Only when the optional verifier is enabled AND present do we add
+            # the custom-verifier gate — otherwise the kwargs are exactly the
+            # bare model load (a missing/disabled verifier changes nothing).
+            if self.verifier_active:
+                model_kwargs["custom_verifier_models"] = {
+                    self.model_path.stem: str(self.verifier_path)
+                }
+                model_kwargs["custom_verifier_threshold"] = self.verifier_threshold
+            self._oww = Model(**model_kwargs)
         except Exception as exc:
             self._oww = None
             return {

@@ -148,16 +148,16 @@ def test_low_ram_blocks_with_ram_message(fake_probes, monkeypatch):
 
 
 def test_thresholds_compare_in_bytes(fake_probes, monkeypatch):
-    """2.6 GB free vs a 2.5 GB threshold: passes ONLY with byte-exact math
+    """2.1 GB free vs a 2.0 GB threshold: passes ONLY with byte-exact math
     (truncating to integer GB would produce a false rejection)."""
     monkeypatch.setattr(resources, "dedicated_vram", lambda: {
-        "total_bytes": 16 * GiB, "used_bytes": 16 * GiB - int(2.6 * GiB),
-        "free_bytes": int(2.6 * GiB), "name": "X", "source": "test",
+        "total_bytes": 16 * GiB, "used_bytes": 16 * GiB - int(2.1 * GiB),
+        "free_bytes": int(2.1 * GiB), "name": "X", "source": "test",
     })
     result = resources.check_resources()
     assert result["checks"]["vram"]["ok"] is True
-    assert result["checks"]["vram"]["free_bytes"] == int(2.6 * GiB)
-    assert result["checks"]["vram"]["required_bytes"] == resources.gb_to_bytes(2.5)
+    assert result["checks"]["vram"]["free_bytes"] == int(2.1 * GiB)
+    assert result["checks"]["vram"]["required_bytes"] == resources.gb_to_bytes(2.0)
 
 
 def test_unprobeable_resource_is_permitted_not_refused(fake_probes, monkeypatch):

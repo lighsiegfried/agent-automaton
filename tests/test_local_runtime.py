@@ -48,6 +48,8 @@ def _status_stubs(monkeypatch, *, llm_info=None, stt=None, wake_deps=(True, []))
     """Stub the Phase 3D.1 status probes so cmd_status never talks to anything."""
     monkeypatch.setattr(local_runtime, "llm_loaded_info", lambda: llm_info)
     monkeypatch.setattr(local_runtime, "voice_status", lambda url: stt)
+    # Docker/WSL RAM detection (Phase 3D.0.5) must not shell out in unit tests.
+    monkeypatch.setattr(local_runtime, "docker_wsl_memory", lambda: {})
     monkeypatch.setattr(local_runtime.fifi_wake, "check_wake_deps", lambda: wake_deps)
     monkeypatch.setattr(local_runtime.fifi_wake, "wake_model_present", lambda: False)
     monkeypatch.setattr(local_runtime.fifi_wake, "wake_active", lambda: False)
@@ -423,11 +425,198 @@ def test_warm_subcommand(monkeypatch):
     assert calls == ["llm", "stt"]
 
 
-def test_model_status_subcommand(monkeypatch):
-    monkeypatch.setattr(local_runtime, "llm_model_status", lambda url, model: True)
+def test_model_status_subcommand_is_unified(monkeypatch, capsys):
+    """model-status now reports the whole orchestration picture (Phase 3D.0.5,
+    req. 7): mode, active voice, required engine, Ollama + Whisper, RAM/VRAM."""
+    monkeypatch.setattr(
+        local_runtime, "docker_wsl_memory", lambda: {"total_gb": 14.0, "source": "docker info"}
+    )
+    monkeypatch.setattr(
+        local_runtime, "llm_loaded_info",
+        lambda: {"processor": "gpu", "vram_gb": 5.6, "fully_gpu": True},
+    )
+    monkeypatch.setattr(local_runtime, "voice_lab_coordinator_status", lambda: {
+        "mode": "daily", "active_voice": "fifi_warm", "required_tts_engine": "kokoro",
+        "loaded_voice_lab_model": None, "engines_loaded": {"kokoro": True},
+        "ollama_loaded": ["qwen2.5:7b"], "whisper_loaded": True,
+        "system_ram_available_gb": 6.0, "dedicated_vram_free_gb": 7.5,
+        "vram_source": "nvidia-smi", "current_heavy_job": None,
+        "fallback_status": "motor principal kokoro (sin fallback)",
+    })
     parser = local_runtime.build_parser()
     args = parser.parse_args(["model-status"])
     assert args.func(args) == 0
+    out = capsys.readouterr().out
+    assert "Runtime mode    : daily" in out
+    assert "Active voice    : fifi_warm" in out
+    assert "Required engine : kokoro" in out
+    assert "Ollama loaded   : ['qwen2.5:7b']" in out
+    assert "Whisper loaded  : True" in out
+    assert "VRAM free       : 7.5 GB (dedicated, nvidia-smi)" in out
+    assert "Docker/WSL RAM  : 14.0 GB total" in out
+
+
+def test_model_status_worker_down_still_reports(monkeypatch, capsys):
+    """A down worker never fails model-status: it falls back to host probes."""
+    monkeypatch.setattr(local_runtime, "docker_wsl_memory", lambda: {})
+    monkeypatch.setattr(local_runtime, "llm_loaded_info", lambda: None)
+    monkeypatch.setattr(local_runtime, "voice_lab_coordinator_status", lambda: None)
+    monkeypatch.setattr(local_runtime, "_system_ram_gb", lambda: {"free_gb": 3.1})
+    monkeypatch.setattr(local_runtime, "_vram_gb", lambda: {"free_gb": 9.2})
+    parser = local_runtime.build_parser()
+    args = parser.parse_args(["model-status"])
+    assert args.func(args) == 0
+    out = capsys.readouterr().out
+    assert "worker not reachable" in out
+    assert "RAM free        : 3.1 GB (host)" in out
+
+
+# --- Phase 3D.0.5: voice-mode / voice-unload / model-optimize / docker RAM ------------
+
+
+def test_docker_ram_warning_thresholds():
+    assert local_runtime.docker_ram_warning({"total_gb": 8.0})  # below floor -> warns
+    assert local_runtime.docker_ram_warning({"total_gb": 16.0}) is None  # ample -> silent
+    assert local_runtime.docker_ram_warning({}) is None  # unknown -> silent
+    warning = local_runtime.docker_ram_warning({"total_gb": 4.0})
+    assert "wslconfig" in warning.lower()
+    assert "never edits" in warning  # the tool never edits .wslconfig for you
+
+
+def test_docker_wsl_memory_prefers_container_view(monkeypatch):
+    monkeypatch.setattr(local_runtime, "voice_lab_runtime", lambda: "docker")
+    monkeypatch.setattr(local_runtime, "voice_lab_resources", lambda: {
+        "system_ram_total_bytes": 14 * 2**30, "system_ram_available_bytes": 9 * 2**30,
+    })
+    mem = local_runtime.docker_wsl_memory()
+    assert mem["source"] == "voice-lab container"
+    assert mem["total_gb"] == 14.0
+    assert mem["free_gb"] == 9.0
+
+
+def test_docker_wsl_memory_falls_back_to_docker_info(monkeypatch):
+    monkeypatch.setattr(local_runtime, "voice_lab_runtime", lambda: "host")
+    monkeypatch.setattr(local_runtime, "_docker_info_mem_total_bytes", lambda: 12 * 2**30)
+    mem = local_runtime.docker_wsl_memory()
+    assert mem == {"source": "docker info", "total_gb": 12.0}
+
+
+def test_voice_mode_subcommand_switches_and_hints(monkeypatch, capsys):
+    monkeypatch.setattr(local_runtime, "_voice_lab_up", lambda: True)
+    calls = {}
+    monkeypatch.setattr(
+        local_runtime, "voice_lab_set_mode",
+        lambda mode: calls.update(mode=mode)
+        or {"status": "ok", "previous_mode": "daily", "mode": mode},
+    )
+    monkeypatch.setattr(local_runtime, "voice_lab_coordinator_status", lambda: {
+        "active_voice": "fifi_warm", "required_tts_engine": "qwen3_tts",
+        "loaded_voice_lab_model": None,
+    })
+    # designer mode does NOT auto-optimize (only low-memory does).
+    monkeypatch.setattr(
+        local_runtime, "voice_lab_optimize",
+        lambda: (_ for _ in ()).throw(AssertionError("optimize only for low-memory")),
+    )
+    parser = local_runtime.build_parser()
+    args = parser.parse_args(["voice-mode", "designer"])
+    assert args.func(args) == 0
+    assert calls["mode"] == "designer"
+    out = capsys.readouterr().out
+    assert "daily -> designer" in out
+    assert "model-optimize" in out  # hint for non-low-memory modes
+
+
+def test_voice_mode_low_memory_frees_heavy(monkeypatch, capsys):
+    monkeypatch.setattr(local_runtime, "_voice_lab_up", lambda: True)
+    monkeypatch.setattr(
+        local_runtime, "voice_lab_set_mode",
+        lambda mode: {"status": "ok", "previous_mode": "daily", "mode": "low-memory"},
+    )
+    freed = {}
+    monkeypatch.setattr(
+        local_runtime, "voice_lab_optimize",
+        lambda: freed.update(called=True)
+        or {"status": "ok", "unloaded_models": ["Qwen/X"], "unloaded_engines": []},
+    )
+    monkeypatch.setattr(local_runtime, "voice_lab_coordinator_status", lambda: {
+        "active_voice": "fifi_warm", "required_tts_engine": "kokoro",
+        "loaded_voice_lab_model": None,
+    })
+    parser = local_runtime.build_parser()
+    args = parser.parse_args(["voice-mode", "low-memory"])
+    assert args.func(args) == 0
+    assert freed.get("called")  # low-memory immediately frees heavy models
+    assert "Freed heavy" in capsys.readouterr().out
+
+
+def test_voice_mode_fails_when_worker_cannot_start(monkeypatch):
+    monkeypatch.setattr(local_runtime, "_voice_lab_up", lambda: False)
+    parser = local_runtime.build_parser()
+    args = parser.parse_args(["voice-mode", "daily"])
+    assert args.func(args) == 1
+
+
+def test_voice_mode_rejects_unknown_mode():
+    """argparse choices refuse a bogus mode before any command runs."""
+    import pytest
+
+    parser = local_runtime.build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["voice-mode", "turbo"])
+
+
+def test_model_optimize_subcommand(monkeypatch, capsys):
+    monkeypatch.setattr(local_runtime, "voice_lab_health", lambda: {"status": "ok"})
+    monkeypatch.setattr(local_runtime, "voice_lab_optimize", lambda: {
+        "status": "ok", "mode": "daily", "kept_engine": "kokoro", "kept_model": "",
+        "unloaded_models": ["Qwen/X"], "unloaded_engines": [],
+        "note": "los archivos en caché no se borran",
+    })
+    parser = local_runtime.build_parser()
+    args = parser.parse_args(["model-optimize"])
+    assert args.func(args) == 0
+    out = capsys.readouterr().out
+    assert "Kept engine     : kokoro" in out
+    assert "Unloaded models : ['Qwen/X']" in out
+    assert "no se borran" in out
+
+
+def test_model_optimize_worker_down_is_noop(monkeypatch, capsys):
+    monkeypatch.setattr(local_runtime, "voice_lab_health", lambda: None)
+    monkeypatch.setattr(
+        local_runtime, "voice_lab_optimize",
+        lambda: (_ for _ in ()).throw(AssertionError("must not optimize a down worker")),
+    )
+    parser = local_runtime.build_parser()
+    args = parser.parse_args(["model-optimize"])
+    assert args.func(args) == 0
+    assert "nothing loaded to optimize" in capsys.readouterr().out
+
+
+def test_voice_unload_subcommand_releases_vram_only(monkeypatch, capsys):
+    monkeypatch.setattr(local_runtime, "voice_lab_health", lambda: {"status": "ok"})
+    monkeypatch.setattr(
+        local_runtime, "voice_lab_unload_engines",
+        lambda engine="": {"status": "ok", "unloaded": ["kokoro"]},
+    )
+    # voice-unload touches the Voice Lab only — never the LLM/Ollama.
+    monkeypatch.setattr(
+        local_runtime, "unload_llm",
+        lambda url, model: (_ for _ in ()).throw(AssertionError("voice-unload must not touch Ollama")),
+    )
+    parser = local_runtime.build_parser()
+    args = parser.parse_args(["voice-unload"])
+    assert args.func(args) == 0
+    assert "Unloaded        : ['kokoro']" in capsys.readouterr().out
+
+
+def test_voice_unload_worker_down_is_noop(monkeypatch, capsys):
+    monkeypatch.setattr(local_runtime, "voice_lab_health", lambda: None)
+    parser = local_runtime.build_parser()
+    args = parser.parse_args(["voice-unload"])
+    assert args.func(args) == 0
+    assert "nothing loaded to unload" in capsys.readouterr().out
 
 
 def test_unload_subcommand_releases_vram_only(monkeypatch):

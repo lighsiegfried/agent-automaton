@@ -591,6 +591,10 @@ def run(argv: list[str] | None = None) -> int:
         return 1
 
     client = fifi_ptt.PttClient(ptt_config, http=http)
+    # Wake requests are hands-free: mark them so /voice/command voices the reply
+    # with the daily latency guard (Qwen->Kokoro, never VoiceDesign). This only
+    # changes how the reply is spoken — it never confirms or permits anything.
+    client.wake_mode = True
 
     def _feedback(kind: str) -> None:
         try:

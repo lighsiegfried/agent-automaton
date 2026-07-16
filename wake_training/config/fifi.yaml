@@ -1,0 +1,10 @@
+# Candidate "fifi" — the bare name. Inherits everything from defaults.yaml.
+#
+#   python wake_training/scripts/wake_trainer.py train fifi
+extends: defaults.yaml
+
+model_name: fifi
+# Multiple written forms so piper generates prosodic variety for the same word.
+target_phrase:
+  - fifi
+  - Fifi

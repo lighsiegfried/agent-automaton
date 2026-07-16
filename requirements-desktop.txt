@@ -7,3 +7,9 @@
 
 -r requirements-voice.txt   # faster-whisper, sounddevice, soundfile, numpy, pyttsx3
 keyboard>=0.13.5            # global push-to-talk hotkey (Windows host client)
+
+# System-tray app (Phase 3E) — optional; the tray prints a clear install hint
+# when these are absent. No Electron.
+pystray>=0.19              # tray icon + menu (Windows host)
+Pillow>=10.0              # renders the status-dot icon (no image assets needed)
+plyer>=2.1                # desktop notifications (best-effort; optional)

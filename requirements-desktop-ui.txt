@@ -1,0 +1,11 @@
+# Native desktop app (Phase 6C) — the PySide6 conversational client. NOT Electron and
+# NOT required by the API server. Install only to run the desktop UI on the host:
+#   .venv\Scripts\python.exe -m pip install -r requirements-desktop-ui.txt
+#   .venv\Scripts\python.exe -m desktop
+#
+# The desktop is a THIN client of the local API: it holds no business logic and no
+# database. All heavy imports are lazy, so the importable/tested code needs none of the
+# packages below.
+
+PySide6>=6.6            # Qt for Python — the native window/widgets (no web runtime)
+httpx>=0.27             # loopback HTTP + SSE streaming to the local API

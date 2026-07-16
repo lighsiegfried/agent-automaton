@@ -1,5 +1,49 @@
 # agent-automaton
 
+# Fifi — Agente personal local con voz
+
+> Agente personal para Windows con voz, wake word, memoria, documentos,
+> tareas, recordatorios, navegador, correo y mensajería controlada.
+
+## Inicio rápido en Windows
+
+.venv\Scripts\python.exe scripts\local_runtime.py start
+.venv\Scripts\python.exe scripts\local_runtime.py voice-start
+.venv\Scripts\python.exe scripts\local_runtime.py voice-mode daily
+.venv\Scripts\python.exe scripts\local_runtime.py voice-warm
+.venv\Scripts\python.exe scripts\local_runtime.py wake-start
+.venv\Scripts\python.exe scripts\local_runtime.py tray
+
+## desktop
+.venv\Scripts\python.exe scripts\local_runtime.py desktop
+
+## estados
+.venv\Scripts\python.exe scripts\local_runtime.py status
+.venv\Scripts\python.exe scripts\local_runtime.py model-status
+
+## apagar ffi
+.venv\Scripts\python.exe scripts\local_runtime.py wake-stop
+.venv\Scripts\python.exe scripts\local_runtime.py voice-stop
+.venv\Scripts\python.exe scripts\local_runtime.py unload
+.venv\Scripts\python.exe scripts\local_runtime.py stop --stop-ollama
+
+
+## inicio automatico  activo/desactivado
+.venv\Scripts\python.exe scripts\local_runtime.py autostart-enable
+.venv\Scripts\python.exe scripts\local_runtime.py autostart-disable
+
+##  inicio rapido total iniciado/parado
+.venv\Scripts\python.exe scripts\local_runtime.py full-start
+.venv\Scripts\python.exe scripts\local_runtime.py full-stop
+## estados globales
+.venv\Scripts\python.exe scripts\local_runtime.py full-restart
+.venv\Scripts\python.exe scripts\local_runtime.py full-status
+
+Abre CMD y entra al proyecto:
+
+```cmd
+cd /d J:\dev\agent-automaton
+
 **Fifi** — a local-first voice assistant for Windows 10. She will eventually
 listen to you, reason with a local LLM (via Ollama), speak back, and execute
 safe PC actions through controlled tools. No cloud APIs required.

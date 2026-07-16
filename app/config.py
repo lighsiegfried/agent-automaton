@@ -133,6 +133,21 @@ class Settings(BaseSettings):
     wake_word_input_device: str = "default"
     wake_word_audio_feedback: bool = True
     wake_word_mute_hotkey: str = "ctrl+alt+m"
+    # Daily wake-mode TTS latency guard (Phase 3D.1). A hands-free spoken reply
+    # must never keep the user waiting: if the active (possibly Qwen) voice can't
+    # synthesize within this budget, the reply falls back to Kokoro — the command
+    # itself already executed. VoiceDesign is NEVER loaded for a wake reply.
+    wake_max_tts_wait_seconds: float = 20.0
+
+    # Optional speaker verifier (Phase 3D.2). Prepared but DISABLED by default —
+    # wake detection works fully without it. When enabled AND the verifier file
+    # exists, the wake service adds an openWakeWord custom-verifier gate trained
+    # from the authorized user's own samples (wake_training/). It only ever makes
+    # detection stricter (a second gate); it never bypasses VAD, confirmation, or
+    # tool permissions, and a missing verifier simply means "not used".
+    enable_wake_word_verifier: bool = False
+    wake_word_verifier_path: str = "models/wake_words/fifi_verifier.pkl"
+    wake_word_verifier_threshold: float = 0.3
 
     enable_push_to_talk: bool = False
     ptt_hotkey: str = "ctrl+alt+space"
@@ -141,6 +156,234 @@ class Settings(BaseSettings):
     ptt_confirm_window_seconds: float = 30.0
     ptt_audio_feedback: bool = True
     ptt_input_device: str = "default"
+
+    # Controlled text insertion (Phase 4A). Drafting/rewriting text is always
+    # safe; inserting it into a Windows app is SENSITIVE and simulated unless
+    # ENABLE_REAL_TEXT_INPUT=true. Real insertion additionally requires an
+    # explicit spoken/typed confirmation phrase, never types into an unverified
+    # window, never presses Enter/submit, never types into password or secret
+    # fields, and never uses the clipboard unless TEXT_ALLOW_CLIPBOARD_FALLBACK
+    # is set (and then restores the previous clipboard). One pending action at a
+    # time; it is memory-only and expires.
+    enable_real_text_input: bool = False
+    text_input_require_confirmation: bool = True
+    text_action_expires_seconds: int = 45
+    text_max_characters: int = 5000
+    text_allowed_apps: str = "notepad,wordpad,winword,chrome,edge"
+    text_allow_clipboard_fallback: bool = False
+    text_block_password_fields: bool = True
+
+    @property
+    def text_allowed_apps_list(self) -> list[str]:
+        return [a.strip().lower() for a in self.text_allowed_apps.split(",") if a.strip()]
+
+    # Safe browser automation (Phase 4B). Reading/searching/scrolling/navigating
+    # are safe; filling a form field is SENSITIVE and requires an explicit
+    # confirmation phrase. Submitting/purchasing/publishing/uploading/deleting/
+    # logging in are blocked in this phase. A dedicated, isolated Chromium
+    # profile is used (never the user's real browser profile); cookies are never
+    # imported and never exposed to the LLM.
+    enable_browser_automation: bool = False
+    browser_engine: str = "chromium"
+    browser_headless: bool = False
+    browser_profile_mode: str = "isolated"          # isolated | (future) authenticated
+    browser_allow_existing_profile: bool = False
+    browser_allowed_schemes: str = "https,http"
+    browser_block_private_networks: bool = True
+    browser_require_confirmation_for_form_fill: bool = True
+    browser_allow_form_submit: bool = False
+    browser_max_page_text_chars: int = 50000
+    browser_action_timeout_seconds: int = 30
+    browser_session_idle_seconds: int = 600
+
+    @property
+    def browser_allowed_schemes_list(self) -> list[str]:
+        return [s.strip().lower() for s in self.browser_allowed_schemes.split(",") if s.strip()]
+
+    # WhatsApp Web automation (Phase 4C). Reuses the controlled browser with a
+    # DEDICATED persistent profile (never the user's normal browser); login is
+    # manual by QR and cookies/tokens are never read or logged. Drafting is safe;
+    # placing a draft and sending are two separate confirmations, and a send
+    # requires naming the recipient. Simulated unless ENABLE_REAL_WHATSAPP_SEND.
+    # No groups, attachments, bulk, or unofficial APIs.
+    enable_whatsapp_automation: bool = False
+    enable_real_whatsapp_send: bool = False
+    whatsapp_profile_dir: str = "storage/browser/whatsapp"
+    whatsapp_action_expires_seconds: int = 45
+    whatsapp_max_message_chars: int = 4000
+    whatsapp_send_cooldown_seconds: int = 5
+    whatsapp_require_recipient_in_confirmation: bool = True
+
+    # Web-email automation (Phase 4D). Reuses the controlled browser with
+    # per-provider dedicated profiles (storage/browser/email/{gmail,outlook});
+    # manual login only; cookies/tokens are never read or logged. Email content
+    # is UNTRUSTED data — summarized, never executed; in-email instructions are
+    # ignored. Drafting is safe; placing a draft and sending are two separate
+    # confirmations and a send must name all recipients. Reply-all and BCC are
+    # blocked this phase. Simulated unless ENABLE_REAL_EMAIL_SEND.
+    enable_email_web_automation: bool = False
+    enable_real_email_send: bool = False
+    email_allowed_providers: str = "gmail,outlook"
+    email_action_expires_seconds: int = 60
+    email_max_body_chars: int = 10000
+    email_max_recipients: int = 3
+    email_allow_cc: bool = True
+    email_allow_bcc: bool = False
+    email_allow_attachments: bool = False
+    email_send_cooldown_seconds: int = 10
+
+    @property
+    def email_allowed_providers_list(self) -> list[str]:
+        return [p.strip().lower() for p in self.email_allowed_providers.split(",") if p.strip()]
+
+    # Personal memory (Phase 5A). Explicit, local, auditable memory for Fifi.
+    # Storage is a local SQLite file (WAL) with schema migrations — no cloud
+    # dependency. Nothing is ever stored merely because it appeared in
+    # conversation: creating/updating/forgetting a memory requires an explicit
+    # user intent ("recuerda que…") that becomes a pending proposal, and then an
+    # EXACT confirmation phrase — a plain "sí", a wake detection, or email/web
+    # content never store memory. Sensitive data (passwords, OTPs, API keys,
+    # cards, private keys, cookies, precise addresses, sensitive personal data)
+    # is blocked by default and never inferred. Retrieval is deterministic and
+    # returns only a small bounded bundle — never the whole database.
+    enable_memory: bool = True
+    memory_db_path: Path = PROJECT_ROOT / "storage" / "memory" / "fifi_memory.db"
+    memory_owner: str = "local"                     # owner scope, single-user default
+    memory_action_expires_seconds: int = 120
+    memory_max_title_chars: int = 200
+    memory_max_content_chars: int = 4000
+    memory_default_confidence: float = 0.8
+    # Bounded retrieval context injected into the planner (never the full DB).
+    memory_context_max_items: int = 5
+    memory_context_max_chars: int = 1500
+    memory_search_max_results: int = 10
+    memory_list_max_results: int = 50
+    memory_block_sensitive: bool = True             # never weakened by a flag
+
+    # Multi-step tasks (Phase 5B). Deterministic, resumable plans over the EXISTING
+    # services with per-effect human confirmation — never unrestricted autonomy,
+    # background agents, or arbitrary loops. An LLM may PROPOSE a plan, but
+    # deterministic code validates every intent/argument against the service
+    # registry (no arbitrary tools/Python/shell/selectors/unknown URLs), rejects
+    # cycles and over-long plans, and classifies each step as read-only / local /
+    # external effect. Plan approval ("aprobar plan") only lets read-only and
+    # local-safe steps begin; it NEVER pre-confirms typing, form-fill, WhatsApp or
+    # email sending — each effect still pauses in the one global broker and needs
+    # its own exact domain phrase. One task executes effects at a time; nothing
+    # auto-resumes after a restart. Stored in a separate local SQLite DB (WAL).
+    enable_multi_step_tasks: bool = False
+    tasks_db_path: Path = PROJECT_ROOT / "storage" / "tasks" / "fifi_tasks.db"
+    task_owner: str = "local"
+    task_max_steps: int = 12
+    task_max_runtime_minutes: int = 20
+    task_max_step_retries: int = 1                  # read-only steps only; effects never retry
+    task_require_plan_approval: bool = True
+    task_allow_background_execution: bool = False
+    task_auto_resume: bool = False
+    task_context_max_memories: int = 5
+    task_context_max_chars: int = 2000
+
+    # Persistent reminders + scheduled tasks (Phase 5C). Schedules fire reminders
+    # and run validated Phase-5B task templates at a time/recurrence, in a separate
+    # local SQLite DB (WAL). Instants are stored in UTC and resolved through the
+    # configured IANA timezone. Creating/modifying a schedule is sensitive (a
+    # pending broker action needing "confirmar programación" — a plain "sí"/wake
+    # never confirms). One owned scheduler polls on a bounded interval and acquires
+    # an atomic per-run lease so a restart or clock change can't double-run. At run
+    # time the plan is REVALIDATED and memory context recomputed; read-only and
+    # local-draft steps may auto-run, but every external effect (WhatsApp/email
+    # send, text insertion, form fill) pauses in the global broker and needs a fresh
+    # domain-specific confirmation — schedule approval never pre-confirms an effect,
+    # and a paused task is never auto-resumed. Off by default.
+    enable_schedules: bool = False
+    schedules_db_path: Path = PROJECT_ROOT / "storage" / "schedules" / "fifi_schedules.db"
+    schedule_owner: str = "local"
+    schedule_timezone: str = "America/Guatemala"
+    schedule_poll_seconds: int = 15
+    schedule_misfire_grace_seconds: int = 300
+    schedule_max_backlog_runs: int = 3
+    schedule_max_active_runs: int = 1
+    schedule_allow_read_only_autorun: bool = True
+    schedule_allow_local_draft_autorun: bool = True
+    schedule_allow_external_effect_autorun: bool = False   # never auto-sends
+
+    # Local Activity Center (Phase 5D). A read-optimized, localhost-only observability
+    # + safe-control UI that AGGREGATES safe events from every subsystem via additive
+    # event hooks (subsystems never depend on the UI) into a separate local SQLite DB
+    # (WAL). It stores only redacted, allowlisted metadata — never secrets, tokens,
+    # cookies, form values, or full email/message/draft bodies. Every control it
+    # offers (confirm/cancel/approve/resume/pause/restart/unload) routes through the
+    # EXISTING services and the one global broker — it never mutates a subsystem DB
+    # directly, never offers a generic "confirm everything", and never kills unrelated
+    # processes. Event writes are best-effort and never block command execution.
+    enable_activity_center: bool = True
+    activity_db_path: Path = PROJECT_ROOT / "storage" / "activity" / "fifi_activity.db"
+    activity_owner: str = "local"
+    activity_retention_days: int = 30
+    activity_max_events: int = 50000
+    activity_redact_content: bool = True                   # never weakened for content
+    activity_ui_host: str = "127.0.0.1"                    # loopback only
+    activity_ui_port: int = 8770
+    activity_enable_export: bool = True
+    activity_page_size: int = 50                           # default timeline pagination
+
+    # Local document Knowledge Vault (Phase 6A) — citation-grounded RAG over locally
+    # ingested documents. Document content is UNTRUSTED data: it can inform answers
+    # but never authorizes an action or modifies memory. Embeddings are generated by
+    # a LOCAL model (deterministic hash fallback; optional sentence-transformers) —
+    # documents are never sent to an external API. Retrieval is hybrid (FTS5 + local
+    # vector similarity), bounded, and every document-derived answer cites
+    # filename + page/section or states insufficient evidence. Deleting a document is
+    # sensitive (a broker confirmation); OCR is disabled and never runs automatically.
+    enable_knowledge_vault: bool = False
+    knowledge_db_path: Path = PROJECT_ROOT / "storage" / "knowledge" / "knowledge.db"
+    knowledge_files_dir: Path = PROJECT_ROOT / "storage" / "knowledge" / "files"
+    knowledge_indexes_dir: Path = PROJECT_ROOT / "storage" / "knowledge" / "indexes"
+    knowledge_owner: str = "local"
+    knowledge_max_file_mb: int = 50
+    knowledge_max_pages: int = 1000
+    knowledge_chunk_size: int = 800
+    knowledge_chunk_overlap: int = 120
+    knowledge_max_results: int = 8
+    knowledge_context_max_chars: int = 10000
+    knowledge_embedding_device: str = "auto"               # auto | cpu | cuda
+    knowledge_allow_ocr: bool = False                      # never runs automatically
+
+    # Deterministic profiles, permissions and trust boundaries (Phase 6B). Profiles
+    # (locked/guest/standard/trusted/developer) are explicit policy bundles — not AI
+    # scores. A single central authorize() gates every service dispatch path with
+    # default-deny; NO profile (including developer) may bypass the mandatory
+    # invariants: recipient-specific confirmation, changed-target/hash revalidation,
+    # secret blocking, the document prompt-injection boundary, no automatic
+    # purchases/deletion/account changes, wake-cannot-confirm, and duplicate-effect
+    # prevention. The authenticated Windows user is the identity boundary; optional
+    # local unlock (Windows Hello or a SALTED password verifier — never plaintext, and
+    # never in .env/logs). Temporary elevation is capability-scoped, visibly expiring,
+    # audited, and cleared on reboot. Off by default (backward compatible); when
+    # enabled it starts locked.
+    enable_security_profiles: bool = False
+    security_db_path: Path = PROJECT_ROOT / "storage" / "security" / "fifi_security.db"
+    security_owner: str = "local"
+    security_default_profile: str = "standard"
+    security_lock_on_start: bool = True
+    security_idle_lock_minutes: int = 15
+    security_allow_windows_hello: bool = True
+    security_allow_local_password: bool = True
+    security_temp_elevation_minutes: int = 10
+    security_max_failed_unlocks: int = 5
+    security_lockout_minutes: int = 5
+
+    # Native desktop app bridge (Phase 6C). The PySide6 desktop client is a THIN
+    # presentation layer that talks ONLY to this localhost API — it holds no business
+    # logic and writes no database. These endpoints mint a short-lived UI session token
+    # and stream safe activity events (SSE). The token is in-memory (cleared on restart)
+    # and gates the stream/overview endpoints. Bind host is forced to loopback. Off by
+    # default (backward compatible); the desktop app enables it for its own process.
+    enable_desktop_bridge: bool = False
+    desktop_bind_host: str = "127.0.0.1"                   # loopback only — never 0.0.0.0
+    desktop_session_ttl_minutes: int = 30                  # short-lived UI session token
+    desktop_stream_heartbeat_seconds: int = 15
+    desktop_stream_queue_max: int = 1000                   # bounded; drops if a client stalls
 
     # Safety
     require_confirmation: bool = True

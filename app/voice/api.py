@@ -123,6 +123,14 @@ async def voice_command(
         default=False,
         description="Approve a sensitive action, same as /command's confirm field",
     ),
+    wake: bool = Query(
+        default=False,
+        description=(
+            "Wake-mode request (Phase 3D.1): always speak the reply and apply the "
+            "daily TTS latency guard (Qwen->Kokoro, never VoiceDesign). Never "
+            "grants confirmation — it only changes how the reply is voiced."
+        ),
+    ),
 ) -> dict[str, Any]:
     """Transcribe a .wav and run it through the normal /command pipeline."""
     if not get_settings().enable_voice:
@@ -148,6 +156,15 @@ async def voice_command(
         CommandRequest(text=text, confirm=confirm, language=transcription.get("language"))
     )
     command_seconds = round(time.perf_counter() - started, 2)
+    try:  # additive Activity Center hook (Phase 5D) — no transcription content stored
+        from app.core import eventbus
+
+        eventbus.emit(domain="wake" if wake else "voice", event_type="voice_command",
+                      status=response.status.value, duration_ms=int(command_seconds * 1000),
+                      metadata={"language": transcription.get("language"),
+                                "mode": "wake" if wake else "ptt"})
+    except Exception:
+        pass
     payload: dict[str, Any] = {
         "status": "ok",
         "transcription": transcription["text"],
@@ -162,22 +179,32 @@ async def voice_command(
             "tts_seconds": None,
         },
     }
-    if get_settings().voice_speak_command_response:
+    # A wake-mode request is hands-free: always voice the reply (with the daily
+    # latency guard), even when VOICE_SPEAK_COMMAND_RESPONSE (which governs PTT)
+    # is off. The command already executed above — TTS never delays it.
+    if get_settings().voice_speak_command_response or wake:
         # TTS can block for seconds (SAPI) or a worker round-trip (voice_lab) —
         # never run it on the event loop; /health must stay responsive.
         started = time.perf_counter()
         payload["speech"] = await run_in_threadpool(
-            _speak_assistant_message, response.assistant_message
+            _speak_assistant_message, response.assistant_message, wake
         )
         payload["timings"]["tts_seconds"] = round(time.perf_counter() - started, 2)
     return payload
 
 
-def _speak_assistant_message(message: str) -> dict[str, Any]:
-    """Speak the reply out loud; report clearly when TTS is unavailable."""
-    result = TextToSpeechService().speak(message)
+def _speak_assistant_message(message: str, wake: bool = False) -> dict[str, Any]:
+    """Speak the reply out loud; report clearly when TTS is unavailable.
+
+    In wake mode the requested vs actual engine (Qwen->Kokoro fallback) is
+    surfaced so the listener can log which voice actually spoke."""
+    result = TextToSpeechService().speak(message, wake=wake)
     if result.get("error"):
         return {"status": "error", "message": result["error"]}
     if result.get("simulated"):
         return {"status": "simulated", "note": result.get("note", "TTS unavailable.")}
-    return {"status": "spoken", "engine": result.get("engine")}
+    spoken: dict[str, Any] = {"status": "spoken", "engine": result.get("engine")}
+    for key in ("requested_engine", "actual_engine", "fallback_used", "fallback_reason"):
+        if result.get(key) is not None:
+            spoken[key] = result[key]
+    return spoken

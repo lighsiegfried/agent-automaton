@@ -1,0 +1,89 @@
+# Shared defaults for every Fifi wake-word candidate (Phase 3D.2).
+#
+# A candidate config (fifi.yaml, oye_fifi.yaml) sets `extends: defaults.yaml`,
+# then overrides model_name / target_phrase (and anything else). Merge rules:
+# nested maps deep-merge; any list a candidate specifies REPLACES the default
+# list (so oye_fifi can drop "oye" from the hard negatives).
+#
+# Reproducibility: the same random_seed + the same sample counts + the same
+# corpora produce the same run. Counts and epochs are deliberately configurable.
+
+language: es                       # Spanish synthetic speech (piper es_* voices)
+random_seed: 1234                  # seeds generation, augmentation, and training
+
+# --- synthetic positive generation (piper-sample-generator, MANY voices) -------
+positive:
+  n_samples: 20000                 # training positives (raise for production)
+  n_samples_val: 2000              # validation positives
+  piper_voices:                    # multiple Spanish voices => speaker diversity
+    - es_ES-carlfm-x_low
+    - es_ES-davefx-medium
+    - es_ES-sharvard-medium
+    - es_MX-ald-medium
+    - es_AR-daniela-high
+  length_scales: [0.8, 1.0, 1.2]   # generation-time speed variety
+  noise_scales: [0.667, 0.8]       # piper prosody variety
+
+# --- augmentation applied to positives (pitch / speed / gain / noise / reverb) -
+augmentation:
+  rounds: 2                        # openWakeWord augmentation_rounds
+  batch_size: 16                   # openWakeWord augmentation_batch_size
+  pitch_semitones: [-3.0, 3.0]     # PitchShift range
+  speed: [0.9, 1.1]                # TimeStretch range
+  gain_db: [-6.0, 6.0]             # Gain range
+  noise_snr_db: [5.0, 25.0]        # additive background-noise SNR range
+  reverb: true                     # convolve with room impulse responses
+
+# --- hard-negative phrases: confusables the model must NOT trigger on ----------
+hard_negative_phrases:
+  - Fina
+  - FIFA
+  - Fifi abre
+  - sí, sí
+  - oye
+  - fifty
+  - fiti
+  - mifi
+  - wifi
+  - feliz
+  - filo
+
+# --- general speech / noise / music negatives + room impulse responses ---------
+# Directories of 16 kHz mono audio (workspace-relative). Populated by
+# `setup.py --download-data` or by pointing these at your own corpora.
+negatives:
+  background_paths:
+    - datasets/negative/speech
+    - datasets/negative/noise
+    - datasets/negative/music
+  background_duplication_rate: 1
+  rir_paths:
+    - datasets/negative/rir
+  # openWakeWord precomputed negative validation features (.npy), used for the
+  # false-positives-per-hour estimate during training/model selection.
+  false_positive_validation_data: datasets/validation/negative_features.npy
+
+# --- training (small classifier head over the shared openWakeWord embedding) ---
+training:
+  steps: 50000
+  max_negative_weight: 1500
+  model_type: dnn
+  layer_size: 96
+  batch_n_per_class: 1024
+  target_false_positives_per_hour: 0.2   # openWakeWord model-selection target
+  target_recall: 0.6
+
+# --- evaluation / model-selection targets (NEVER just training accuracy) -------
+evaluation:
+  target_false_positives_per_hour: 0.5
+  min_recall: 0.7
+  # Real-world conditions the evaluation reports separately.
+  conditions: [quiet, noisy, far_field, music, conversation, keyboard]
+
+# --- optional speaker verifier (openWakeWord custom verifier) ------------------
+# Disabled by default; wake detection works fully without it. Trained from the
+# authorized user's own recordings (record_samples.py) when enabled.
+verifier:
+  enabled: false
+  threshold: 0.3
+  reference_dir: datasets/positive/user

@@ -1,0 +1,25 @@
+# Candidate "oye_fifi" — the two-word "oye Fifi" attention phrase. Inherits
+# defaults.yaml, but overrides the hard negatives: "oye" is now PART of the wake
+# phrase, so it must not be a hard negative. We instead add "oye <other name>"
+# distractors so the model learns "oye" alone (or with another name) is NOT it.
+#
+#   python wake_training/scripts/wake_trainer.py train oye_fifi
+extends: defaults.yaml
+
+model_name: oye_fifi
+target_phrase:
+  - oye fifi
+  - oye, fifi
+
+# Replaces the default list (list = replace, per the merge rules in defaults.yaml).
+hard_negative_phrases:
+  - oye Sofía
+  - oye Sara
+  - oye amigo
+  - oye Siri
+  - Fina
+  - FIFA
+  - oye Fifi abre
+  - sí, sí
+  - fifty
+  - wifi

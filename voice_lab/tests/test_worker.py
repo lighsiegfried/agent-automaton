@@ -1020,7 +1020,7 @@ def test_resources_status_endpoint(client, engines, fast_infra):
     assert data["dedicated_vram_free_gb"] == 8.0
     assert data["disk_free_gb"] == 50.0
     assert data["gpu_name"] == "RTX 5060 Ti"
-    assert data["thresholds"]["min_free_vram_gb"] == 2.5
+    assert data["thresholds"]["min_free_vram_gb"] == 2.0
     assert data["thresholds"]["min_free_disk_gb"] == 5.0
     assert data["blocking"] is None
     assert _scan_for_absolute_paths(data) == []
@@ -1385,3 +1385,109 @@ def test_ui_has_reconnection_and_interrupted_handling():
     assert "reconectando" in html
     assert "Math.min(10000" in html  # backoff capped at 10 s
     assert "stalled" in html
+
+
+# --- Phase 3D.0.5: coordinator modes, optimize, low-memory fallback ---------------------
+
+
+def test_mode_endpoint_get_and_switch(client):
+    assert client.get("/mode").json()["mode"] == "daily"
+    switched = client.post("/mode", json={"mode": "designer"}).json()
+    assert switched["status"] == "ok"
+    assert switched["previous_mode"] == "daily"
+    assert switched["mode"] == "designer"
+    assert client.get("/mode").json()["mode"] == "designer"
+    # Any spelling normalizes: low_memory -> low-memory.
+    assert client.post("/mode", json={"mode": "low_memory"}).json()["mode"] == "low-memory"
+
+
+def test_low_memory_refuses_heavy_design_job(client, engines, manager, fast_infra):
+    """low-memory mode never loads a heavy Qwen model — a VoiceDesign job is
+    refused at preflight (structured, never queued)."""
+    client.post("/mode", json={"mode": "low-memory"})
+    response = client.post(
+        "/jobs/voice-design", json={"profile_name": "fifi_lm", "language": "es"}
+    )
+    assert response.status_code == 503
+    data = response.json()
+    assert data["error_code"] == "mode_low_memory"
+    assert "baja memoria" in data["user_message"]
+    assert data["retryable"] is False
+    assert client.get("/jobs/active").json()["jobs"] == []  # never queued
+    assert engines["qwen3_tts"].synth_calls == 0
+
+
+def test_low_memory_preview_of_qwen_profile_falls_back_to_kokoro(
+    client, engines, manager, voices_dir, fast_infra
+):
+    """A qwen profile in low-memory mode is served by Kokoro — the request is
+    accepted as a LIGHT job (not refused), and the heavy engine is never used."""
+    _make_qwen_profile(voices_dir, "fifi_qlm")
+    client.post("/mode", json={"mode": "low-memory"})
+    job = client.post(
+        "/jobs/profile-preview", json={"profile": "fifi_qlm", "text": "Baja memoria."}
+    ).json()
+    assert job["job_id"]  # accepted, not refused
+    final = _wait_job(client, job["job_id"])
+    assert final["status"] == "completed"
+    assert final["result"]["actual_engine"] == "kokoro"  # collapsed away from qwen
+    assert engines["qwen3_tts"].synth_calls == 0  # heavy engine never touched
+
+
+def test_synthesize_qwen_profile_low_memory_uses_kokoro(
+    client, engines, manager, voices_dir, fast_infra
+):
+    _make_qwen_profile(voices_dir, "fifi_qsyn")
+    client.post("/mode", json={"mode": "low-memory"})
+    data = client.post("/synthesize", json={"text": "hola", "profile": "fifi_qsyn"}).json()
+    assert data["status"] == "ok"
+    assert data["engine"] == "kokoro"
+    assert data["requested_engine"] == "qwen3_tts"
+    assert data["fallback_used"] is True
+    assert engines["qwen3_tts"].synth_calls == 0
+
+
+def test_models_optimize_unloads_non_required_and_keeps_cache(
+    client, engines, manager, monkeypatch, fast_infra
+):
+    from app.engines import base as base_module
+    from app.engines.qwen3_tts import CLONE_MODEL_ID, DEFAULT_MODEL_ID
+
+    class FakeQwen:
+        def __init__(self):
+            self._models = {DEFAULT_MODEL_ID: object(), CLONE_MODEL_ID: object()}
+            self.unloaded = []
+
+        def unload_model(self, mid):
+            self._models.pop(mid, None)
+            self.unloaded.append(mid)
+            return True
+
+    fake = FakeQwen()
+    monkeypatch.setitem(base_module._instances, "qwen3_tts", fake)
+    monkeypatch.setattr(base_module, "loaded_engines", lambda: {"kokoro": True, "qwen3_tts": True})
+    monkeypatch.setattr(base_module, "unload_all", lambda only=None: [only] if only else [])
+    manager.select("fifi_warm")  # active voice = Kokoro
+    data = client.post("/models/optimize", json={}).json()
+    assert data["status"] == "ok"
+    assert data["kept_engine"] == "kokoro"
+    assert data["unloaded_engines"] == []  # kokoro is the active engine — kept
+    assert set(data["unloaded_models"]) == {DEFAULT_MODEL_ID, CLONE_MODEL_ID}
+    assert fake._models == {}  # both heavy models freed
+    assert "no se borran" in data["note"]  # cached weights untouched
+
+
+def test_coordinator_status_endpoint_has_req7_fields(client, engines, manager, fast_infra):
+    manager.select("fifi_warm")
+    data = client.get("/coordinator/status").json()
+    assert data["status"] == "ok"
+    assert data["mode"] == "daily"
+    assert data["active_voice"] == "fifi_warm"
+    assert data["required_tts_engine"] == "kokoro"
+    assert data["system_ram_available_gb"] == 8.0  # from fast_infra fakes
+    assert data["dedicated_vram_free_gb"] == 8.0
+    assert data["shared_gpu_memory"] is None  # never counted as VRAM
+    for key in ("mode", "active_voice", "required_tts_engine", "loaded_voice_lab_model",
+                "ollama_loaded", "whisper_loaded", "current_heavy_job", "fallback_status"):
+        assert key in data, key
+    assert _scan_for_absolute_paths(data) == []

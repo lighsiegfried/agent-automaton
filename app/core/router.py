@@ -13,10 +13,10 @@ loosen it.
 import re
 
 from app.config import get_settings
-from app.core import memory, safety
+from app.core import conversation, memory, nl, safety
 from app.core.logger import get_logger
 from app.llm.command_planner import CommandPlan, plan_command
-from app.llm.response_generator import generate_assistant_message
+from app.llm.response_generator import generate_assistant_message, resolve_language
 from app.schemas.commands import (
     CommandRequest,
     CommandResponse,
@@ -26,6 +26,18 @@ from app.schemas.commands import (
     PlannerSource,
     SafetyLevel,
 )
+
+# Normalized dispatcher status -> the legacy ExecutionStatus for CommandResponse.
+_SERVICE_STATUS_MAP: dict[str, ExecutionStatus] = {
+    "needs_confirmation": ExecutionStatus.NEEDS_CONFIRMATION,
+    "executed": ExecutionStatus.EXECUTED,
+    "filled": ExecutionStatus.EXECUTED,
+    "ok": ExecutionStatus.EXECUTED,
+    "simulated": ExecutionStatus.SIMULATED,
+    "cancelled": ExecutionStatus.EXECUTED,
+    "rejected": ExecutionStatus.REJECTED,
+    "error": ExecutionStatus.REJECTED,
+}
 from app.tools.registry import INTENT_TOOL_MAP, Tool, registry
 
 log = get_logger(__name__)
@@ -159,6 +171,14 @@ def _execute(
         status = ExecutionStatus.EXECUTED
         message = f"Executed '{tool.name}'. {decision.reason}"
 
+    try:  # additive Activity Center hook (Phase 5D) — safe fields only
+        from app.core import eventbus
+
+        eventbus.emit(domain="command", event_type=intent.value, status=status.value,
+                      metadata={"intent": intent.value})
+    except Exception:
+        pass
+
     return CommandResponse(
         input_text=request.text,
         intent=intent,
@@ -187,6 +207,18 @@ def _dispatch_rules(request: CommandRequest, routing_text: str | None = None) ->
 
 
 def _dispatch_plan(request: CommandRequest, plan: CommandPlan) -> CommandResponse:
+    # A validated service-intent plan goes to the deterministic dispatcher.
+    if plan.intent.value in conversation.SERVICE_INTENT_ARGS:
+        command = nl.ServiceCommand(
+            intent=plan.intent.value, arguments=dict(plan.arguments),
+            is_confirmation=(plan.intent.value == "confirm"),
+            confirmation_phrase=str(plan.arguments.get("phrase", "")),
+        )
+        response = _dispatch_service(request, command)
+        response.plan = PlanInfo(confidence=plan.confidence,
+                                 reasoning_summary=plan.reasoning_summary, language=plan.language)
+        return response
+
     tool = registry.get(plan.tool_name)  # validated to exist and be non-destructive
     assert tool is not None
     response = _execute(
@@ -200,10 +232,51 @@ def _dispatch_plan(request: CommandRequest, plan: CommandPlan) -> CommandRespons
     return response
 
 
+def _service_language(request: CommandRequest, routing_text: str) -> str:
+    if request.language:
+        return "en" if request.language.strip().lower().startswith("en") else "es"
+    # Reuse the response generator's language heuristic on the routing text.
+    probe = CommandResponse(input_text=routing_text, intent=Intent.UNKNOWN,
+                            status=ExecutionStatus.NOT_HANDLED, message="")
+    return resolve_language(probe)
+
+
+def _dispatch_service(request: CommandRequest, command: "nl.ServiceCommand") -> CommandResponse:
+    """Route a conversational service command through the deterministic dispatcher."""
+    language = _service_language(request, request.text)
+    result = conversation.dispatch(command, language=language)
+    try:
+        intent_enum = Intent(command.intent)
+    except ValueError:
+        intent_enum = Intent.UNKNOWN
+    response = CommandResponse(
+        input_text=request.text,
+        intent=intent_enum,
+        status=_SERVICE_STATUS_MAP.get(result["status"], ExecutionStatus.REJECTED),
+        message=result["spoken"],
+        result={k: v for k, v in result.items() if k != "spoken"},
+    )
+    response.assistant_message = result["spoken"]   # already safe + localized
+    return response
+
+
 def handle_command(request: CommandRequest) -> CommandResponse:
     # Strip a leading "Fifi"/"hey Fifi" for routing only; request.text (the
     # original transcription) is preserved for the response and the command log.
     routing_text = strip_invocation_prefix(request.text)
+
+    # Conversational service intents (text/browser drafting, confirmation, cancel)
+    # are handled by the deterministic dispatcher BEFORE the tool router, so the
+    # legacy tool behaviour ("busca X", "abre <app>") is unchanged.
+    service_command = nl.parse(routing_text)
+    if service_command is not None:
+        log.info("service intent=%s", service_command.intent)
+        response = _dispatch_service(request, service_command)
+        memory.log_command(
+            input_text=request.text, intent=response.intent.value, tool=None,
+            status=response.status.value, result=response.result,
+        )
+        return response
 
     if get_settings().enable_llm_planner:
         outcome = plan_command(routing_text)
@@ -221,9 +294,12 @@ def handle_command(request: CommandRequest) -> CommandResponse:
         response = _dispatch_rules(request, routing_text)
         response.planner = PlannerSource.RULE_ROUTER
 
-    response.assistant_message = generate_assistant_message(
-        response, language=request.language
-    )
+    # Service dispatches already produced a safe, localized spoken line; only the
+    # tool path needs the template/LLM response generator.
+    if not response.assistant_message:
+        response.assistant_message = generate_assistant_message(
+            response, language=request.language
+        )
 
     memory.log_command(
         input_text=request.text,

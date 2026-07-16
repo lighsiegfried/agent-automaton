@@ -317,6 +317,10 @@ class PttClient:
         self.clock = clock
         self.out = out
         self.pending = PendingConfirmation(clock=clock)
+        # Wake mode (Phase 3D.1): the wake listener sets this True so /voice/command
+        # applies the daily TTS latency guard and voices the reply hands-free.
+        # Push-to-talk leaves it False. It NEVER affects confirmation/safety.
+        self.wake_mode = False
         self._recorder = None
         self._recording = False
         self._lock = threading.Lock()
@@ -455,7 +459,7 @@ class PttClient:
             with open(wav_path, "rb") as audio:
                 response = self.http.post(
                     "/voice/command",
-                    params={"confirm": confirm},
+                    params={"confirm": confirm, "wake": self.wake_mode},
                     files={"file": (os.path.basename(wav_path), audio, "audio/wav")},
                     timeout=self._timeout(),
                 )

@@ -27,6 +27,17 @@ os.environ["VOICE_LAB_PREVIEW_TEXT"] = (
     "Hola, soy Fifi. El sistema está listo y puedo ayudarte con tus tareas. "
     "¿En qué trabajaremos hoy?"
 )
+# The suite must not depend on the machine's voice_lab/.env: pin the resource
+# thresholds and the runtime mode to their canonical Phase 3D.0.5 values, and
+# DISABLE the background idle unloader (tests drive idle_unload_tick directly).
+os.environ["VOICE_LAB_MIN_FREE_SYSTEM_RAM_GB"] = "2.0"
+os.environ["VOICE_LAB_MIN_FREE_VRAM_GB"] = "2.0"
+os.environ["VOICE_LAB_MIN_FREE_DISK_GB"] = "5.0"
+os.environ["VOICE_LAB_MODE"] = "daily"
+os.environ["VOICE_LAB_IDLE_UNLOAD_SECONDS"] = "0"
+os.environ["VOICE_LAB_MAX_LOADED_HEAVY_MODELS"] = "1"
+os.environ["VOICE_LAB_ALLOW_KOKORO_FALLBACK"] = "true"
+os.environ["VOICE_LAB_DESIGNER_AUTO_UNLOAD_OLLAMA"] = "false"
 
 import pytest  # noqa: E402
 
@@ -111,3 +122,18 @@ def manager(voices_dir: Path) -> ProfileManager:
     return ProfileManager(
         profiles_dir=voices_dir / "profiles", active_path=voices_dir / "active.json"
     )
+
+
+@pytest.fixture(autouse=True)
+def fresh_coordinator(tmp_path, monkeypatch):
+    """Every test gets a clean coordinator on a temp state dir (mode=daily from
+    the pinned env), never the machine's persisted mode. When app.main is loaded
+    (worker tests), point its module-global `coordinator` at the fresh one so the
+    endpoints and the gate use the isolated instance."""
+    from app import coordinator as coord_mod
+
+    fresh = coord_mod.reset_coordinator(state_dir=tmp_path / "coordinator")
+    worker = sys.modules.get("app.main")
+    if worker is not None:
+        monkeypatch.setattr(worker, "coordinator", fresh, raising=False)
+    return fresh

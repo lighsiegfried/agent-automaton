@@ -37,6 +37,7 @@ from app.build import (
 )
 from app.config import (
     PREVIEWS_DIR,
+    VOICE_LAB_MODES,
     VOICE_LAB_ROOT,
     ensure_isolated_dirs,
     get_settings,
@@ -45,6 +46,7 @@ from app.config import (
 from app import auditions, gpu, resources
 import app.jobs as jobs_mod
 from app.jobs import WORKER_INSTANCE_ID, WORKER_STARTED_UTC
+from app.coordinator import get_coordinator, kind_target_model
 from app.designer import DEFAULT_MODE, FORM_OPTIONS, MODES, DesignerError, VoiceDesigner
 from app.engines.base import get_engine, loaded_engines, unload_all
 from app.engines.qwen3_tts import CLONE_MODEL_ID, DEFAULT_MODEL_ID, is_clone_base, is_voice_design
@@ -69,6 +71,9 @@ app = FastAPI(title="fifi-voice-lab", version=VERSION)
 manager = ProfileManager()
 designer = VoiceDesigner()
 jobs = JobManager(heavy_slots=get_settings().heavy_job_concurrency)
+# The RAM/VRAM-aware model coordinator (Phase 3D.0.5) — one shared brain that
+# decides what may load, evicts unused heavy models, and reclaims idle VRAM.
+coordinator = get_coordinator()
 _started_at = time.monotonic()
 
 # Worker identity (Phase 3D.0.3a) — safe booleans and fingerprints only, never
@@ -124,6 +129,10 @@ def _startup() -> None:
     WORKER_IDENTITY = _compute_identity()
     _engines_available_cache = None
     _store_state = manager.store_check()
+    # Coordinator (Phase 3D.0.5): wire the idle unloader to the live job queue
+    # (a heavy job in flight is never unloaded) and start the idle watcher.
+    coordinator.bind_jobs(jobs)
+    coordinator.start_idle_thread()
 
 
 class PreviewRequest(BaseModel):
@@ -145,6 +154,10 @@ class UnloadRequest(BaseModel):
     engine: str = ""  # empty = unload every loaded engine
 
 
+class ModeRequest(BaseModel):
+    mode: str = Field(min_length=1)  # daily | designer | low-memory
+
+
 class WarmRequest(BaseModel):
     profile: str = ""  # empty = active profile
     ui_build: str = ""
@@ -164,24 +177,23 @@ def _resolve_profile(name: str) -> VoiceProfile:
 
 
 def _fallback_chain(profile: VoiceProfile) -> list[str]:
-    """Preferred order (Phase 3D.0.1): selected engine -> kokoro -> windows_sapi.
+    """Preferred order for THIS profile under the current runtime mode.
 
-    The profile's own fallback_engine still participates, but never ahead of
-    kokoro; duplicates collapse while preserving order.
+    Delegated to the coordinator (Phase 3D.0.5): base order is selected engine
+    -> kokoro -> profile fallback -> windows_sapi, but low-memory mode drops the
+    heavy Qwen engine and VOICE_LAB_ALLOW_KOKORO_FALLBACK can drop Kokoro.
     """
-    chain: list[str] = []
-    for name in (profile.engine, "kokoro", profile.fallback_engine, "windows_sapi"):
-        if name and name not in chain:
-            chain.append(name)
-    return chain
+    return coordinator.effective_fallback_chain(profile)
 
 
 def _synthesize_with_fallback(text: str, profile: VoiceProfile, out_path: Path) -> dict[str, Any]:
     """Walk the fallback chain; report the engine ACTUALLY used."""
+    coordinator.note_activity()  # a synthesis resets the idle-unload clock
     attempts: list[str] = []
     for engine_name in _fallback_chain(profile):
         result = get_engine(engine_name).synthesize(text, profile, out_path)
         if result["status"] == "ok":
+            coordinator.note_engine_use(engine_name, profile.model)
             payload = {
                 **result,  # result["engine"] is the engine actually used
                 "requested_engine": profile.engine,
@@ -494,8 +506,11 @@ class VoiceDesignJobRequest(GenerateRequest):
 
 
 def _profile_is_heavy(profile_name: str) -> bool:
+    """Will serving this profile actually load a heavy Qwen model? The
+    coordinator answers False in low-memory mode, where the effective engine is
+    Kokoro/Windows, so the job is treated as light (no heavy gate)."""
     try:
-        return manager.get_profile(profile_name).engine == "qwen3_tts"
+        return coordinator.profile_is_heavy(manager.get_profile(profile_name))
     except ProfileError:
         return False  # the job itself will fail fast with a clean error
 
@@ -626,6 +641,19 @@ def preflight_result(
     else:
         checks["engine"] = {"ok": True, "name": None}
 
+    # Runtime-mode gate (Phase 3D.0.5): a heavy Qwen job is refused in
+    # low-memory mode. (Normal Kokoro/Windows responses stay light and are never
+    # affected — _profile_is_heavy already returns False for them in this mode.)
+    checks["mode"] = {"ok": True, "mode": coordinator.mode}
+    if heavy:
+        allowed, mode_reason = coordinator.mode_allows_heavy("voice_design")
+        checks["mode"]["ok"] = allowed
+        if not allowed:
+            block(
+                503, "mode_low_memory", mode_reason,
+                f"mode={coordinator.mode}", False,
+            )
+
     model_loaded = _model_resident(model)
     cache_state = gpu.model_cache_status(model) if model else "cached"
     checks["model_cache"] = {
@@ -736,23 +764,33 @@ def _gate_headroom(kind: str, allow_ollama_unload: bool) -> None:
     from app import progress
     from app.engines.base import _instances
 
+    # Runtime-mode gate (Phase 3D.0.5): low-memory mode never loads heavy Qwen
+    # models. Preflight already refuses such jobs; this protects the direct
+    # job-runner path (warm/freeze) too — defense in depth.
+    allowed, mode_reason = coordinator.mode_allows_heavy(kind)
+    if not allowed:
+        raise JobError(mode_reason, "mode_low_memory")
+
     qwen = _instances.get("qwen3_tts")
-    target = DEFAULT_MODEL_ID if kind == "voice_design" else CLONE_MODEL_ID
+    target = kind_target_model(kind)
     if qwen is not None and target in getattr(qwen, "_models", {}):
         return  # already resident: no new VRAM/RAM needed
 
-    # RAM protection (hotfix, req. 8): before loading Qwen, drop every UNUSED
-    # Voice Lab model and garbage-collect, then verify free system RAM. On a
-    # 16 GB machine a load under memory pressure dies NATIVELY (no traceback)
-    # — refuse clearly instead of letting Windows kill the worker silently.
-    if qwen is not None:
-        for model_id in list(getattr(qwen, "_models", {})):
-            if model_id != target:
-                progress.report(
-                    "preparing",
-                    message="Liberando modelos de Voice Lab no usados antes de cargar…",
-                )
-                qwen.unload_model(model_id)  # ref release -> gc -> CUDA cache
+    # Designer mode may consent to a temporary Ollama unload without per-job UI
+    # consent (VOICE_LAB_DESIGNER_AUTO_UNLOAD_OLLAMA).
+    allow_ollama_unload = allow_ollama_unload or coordinator.designer_ollama_consent(kind)
+
+    # RAM protection (hotfix, req. 8): before loading Qwen, evict UNUSED heavy
+    # Voice Lab models beyond the resident limit (LRU first) and garbage-collect,
+    # then verify free system RAM. On a 16 GB machine a load under memory
+    # pressure dies NATIVELY (no traceback) — refuse clearly instead of letting
+    # Windows kill the worker silently. Cached weights are never deleted.
+    if qwen is not None and coordinator.unused_heavy_models(target):
+        progress.report(
+            "preparing",
+            message="Liberando modelos de Voice Lab no usados antes de cargar…",
+        )
+        coordinator.prepare_for_heavy_load(target)  # ref release -> gc -> CUDA cache
     if get_settings().exclusive_design_mode and kind == "voice_design":
         # Exclusive design mode (req. 15): also free Kokoro. The main API is
         # never stopped; Ollama is only touched via the separate,
@@ -1023,6 +1061,63 @@ async def resources_status() -> dict[str, Any]:
     }
 
 
+@app.get("/coordinator/status")
+async def coordinator_status() -> dict[str, Any]:
+    """The full RAM/VRAM-aware orchestration picture (Phase 3D.0.5, req. 7):
+    runtime mode, active voice, required TTS engine, loaded Voice Lab model,
+    Ollama/Whisper state, free RAM/VRAM, the current heavy job, and fallback
+    status. No paths, no secrets; shared GPU memory is never counted as VRAM."""
+    try:
+        profile = _resolve_profile("")
+    except ProfileError:
+        profile = None
+    status = await run_in_threadpool(coordinator.status, profile, jobs)
+    return {"status": "ok", "worker": _worker_status(), **status}
+
+
+@app.get("/mode")
+def get_mode() -> dict[str, Any]:
+    """The active runtime mode and the coordinator's live policy thresholds."""
+    settings = get_settings()
+    return {
+        "status": "ok",
+        "mode": coordinator.mode,
+        "available_modes": list(VOICE_LAB_MODES),
+        "idle_unload_seconds": settings.idle_unload_seconds,
+        "max_loaded_heavy_models": settings.max_loaded_heavy_models,
+        "allow_kokoro_fallback": settings.allow_kokoro_fallback,
+        "designer_auto_unload_ollama": settings.designer_auto_unload_ollama,
+    }
+
+
+@app.post("/mode")
+async def set_mode(request: ModeRequest) -> dict[str, Any]:
+    """Switch runtime mode (daily/designer/low-memory). Switching does not load
+    or unload anything by itself — run /models/optimize to enforce the policy
+    immediately, or let idle unloading and the next load apply it."""
+    previous = coordinator.mode
+    mode = await run_in_threadpool(coordinator.set_mode, request.mode)
+    return {"status": "ok", "mode": mode, "previous_mode": previous}
+
+
+@app.post("/models/optimize")
+async def models_optimize() -> dict[str, Any]:
+    """Enforce the daily-use policy NOW: unload every engine/model not required
+    by the active voice profile (heavy Qwen models it does not need, and Kokoro
+    when it is not the active engine). Cached weight files are never deleted."""
+    try:
+        profile = _resolve_profile("")
+    except ProfileError:
+        profile = None
+    result = await run_in_threadpool(coordinator.enforce_policy, profile, "model-optimize")
+    return {
+        "status": "ok",
+        "mode": coordinator.mode,
+        **result,
+        "note": "los archivos en caché no se borran",
+    }
+
+
 class PreflightRequest(BaseModel):
     kind: str = "voice_design"  # voice_design | freeze | profile_preview
     profile: str = ""
@@ -1210,7 +1305,10 @@ def _job_warm(profile: VoiceProfile):
     def run(job: dict[str, Any], tmp_dir: Path) -> dict[str, Any]:
         from app import progress
 
-        if profile.engine == "qwen3_tts":
+        # Only gate a heavy load that will ACTUALLY happen: in low-memory mode
+        # the effective engine is Kokoro, so warm just synthesizes through the
+        # fallback chain (no Qwen load, no refusal).
+        if coordinator.profile_is_heavy(profile):
             kind = "voice_design" if is_voice_design(profile.model) else "clone"
             _gate_headroom(kind, False)
         warm_path = tmp_dir / "warm.wav"
@@ -1254,8 +1352,12 @@ def warm(request: WarmRequest):
             404, "unknown_profile", f"El perfil solicitado no existe.",
             technical=str(exc), retryable=False,
         )
-    heavy = profile.engine == "qwen3_tts"
-    engine_obj = get_engine(profile.engine)
+    # The engine that will actually serve this profile under the current mode
+    # (low-memory collapses a Qwen profile to Kokoro), and whether that entails
+    # a heavy load at all.
+    effective_engine = coordinator.required_engine(profile)
+    heavy = coordinator.profile_is_heavy(profile)
+    engine_obj = get_engine(effective_engine)
     already = engine_obj.loaded and (not heavy or _model_resident(profile.model))
     if already:
         last = jobs.last_terminal("warm", model=profile.model)
@@ -1263,7 +1365,7 @@ def warm(request: WarmRequest):
             "status": "ready",
             "already_loaded": True,
             "profile": profile.name,
-            "engine": profile.engine,
+            "engine": effective_engine,
             "model": profile.model,
             "message": "El motor ya está cargado.",
             "last_warm_job": last,

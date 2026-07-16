@@ -23,6 +23,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.config import get_settings
+from app.core import conversation
 from app.core.logger import get_logger
 from app.llm.ollama_client import OllamaClient
 from app.llm.prompts import PLANNER_SYSTEM_PROMPT, build_planner_prompt
@@ -102,6 +103,10 @@ def _validate_plan(plan: CommandPlan) -> str | None:
         return "planner returned intent 'unknown'"
     if plan.confidence < MIN_CONFIDENCE:
         return f"confidence {plan.confidence:.2f} below threshold {MIN_CONFIDENCE}"
+    # Conversational service intents don't map to a tool — they're validated by
+    # their argument allowlist and executed by the deterministic dispatcher.
+    if plan.intent.value in conversation.SERVICE_INTENT_ARGS:
+        return conversation.validate_service_args(plan.intent.value, plan.arguments)
     tool = registry.get(plan.tool_name)
     if tool is None:
         return f"unknown tool {plan.tool_name!r}"
@@ -130,7 +135,10 @@ def plan_command(text: str) -> PlannerOutcome:
     except ValidationError as exc:
         return PlannerOutcome(failure=f"plan schema invalid: {exc.error_count()} error(s)")
 
-    plan.arguments = {key: str(value) for key, value in plan.arguments.items()}
+    # Tool arguments are coerced to strings; service intents keep structured
+    # arguments (e.g. browser form fields) validated by the dispatcher.
+    if plan.intent.value not in conversation.SERVICE_INTENT_ARGS:
+        plan.arguments = {key: str(value) for key, value in plan.arguments.items()}
 
     failure = _validate_plan(plan)
     if failure:

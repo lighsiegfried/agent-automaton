@@ -47,6 +47,8 @@ import fifi_ptt  # noqa: E402
 import fifi_wake  # noqa: E402
 import llm_smoke  # noqa: E402
 import prewarm_runtime  # noqa: E402
+import wake_calibrate  # noqa: E402  (wake-calibrate: listens, never executes commands)
+import fifi_autostart  # noqa: E402  (Phase 3E: Task Scheduler auto-start)
 
 # Runtime state and logs live under storage/ (gitignored — never committed).
 RUNTIME_DIR = PROJECT_ROOT / "storage" / "runtime"
@@ -293,6 +295,41 @@ def voice_lab_job(job_id: str) -> dict | None:
 
 def voice_lab_resources() -> dict | None:
     return llm_smoke.get_json(f"{voice_lab_url()}/resources/status", timeout=20.0)
+
+
+def voice_lab_coordinator_status() -> dict | None:
+    """The unified RAM/VRAM orchestration picture (Phase 3D.0.5). Read-only."""
+    return llm_smoke.get_json(f"{voice_lab_url()}/coordinator/status", timeout=20.0)
+
+
+def voice_lab_get_mode() -> dict | None:
+    return llm_smoke.get_json(f"{voice_lab_url()}/mode", timeout=10.0)
+
+
+def _voice_lab_post(path: str, payload: dict, timeout: float = 60.0) -> dict | None:
+    """POST JSON to the worker; None on any transport/parse error (never raises)."""
+    import httpx
+
+    try:
+        response = httpx.post(f"{voice_lab_url()}{path}", json=payload, timeout=timeout)
+        return response.json()
+    except (httpx.HTTPError, ValueError):
+        return None
+
+
+def voice_lab_set_mode(mode: str) -> dict | None:
+    return _voice_lab_post("/mode", {"mode": mode}, timeout=15.0)
+
+
+def voice_lab_optimize() -> dict | None:
+    """Enforce the daily-use policy now (unload everything the active voice does
+    not need). Never deletes cached weights."""
+    return _voice_lab_post("/models/optimize", {}, timeout=60.0)
+
+
+def voice_lab_unload_engines(engine: str = "") -> dict | None:
+    """Release Voice Lab VRAM (all engines, or one). Cached files are untouched."""
+    return _voice_lab_post("/unload", {"engine": engine}, timeout=60.0)
 
 
 def warm_timeout_seconds() -> float:
@@ -889,6 +926,16 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"GPU detected    : {gpu_detected}")
     print(f"GPU name        : {gpu_detail}")
 
+    # Docker/WSL RAM visibility (Phase 3D.0.5, req. 8): the Voice Lab and Ollama
+    # share ONE WSL2 memory pool — warn (never edit .wslconfig) when it is tight.
+    if docker_ok:
+        mem = docker_wsl_memory()
+        if mem:
+            print(f"Docker/WSL RAM  : {mem.get('total_gb', '?')} GB total ({mem.get('source')})")
+            warning = docker_ram_warning(mem)
+            if warning:
+                print(warning)
+
     model = configured_model()
     print(f"Configured model: {model}")
     model_ok = llm_smoke.model_present(ollama_url(), model) if docker_ok else False
@@ -971,9 +1018,81 @@ def cmd_warm(args: argparse.Namespace) -> int:
 
 
 def cmd_model_status(args: argparse.Namespace) -> int:
-    """Report whether the configured model is loaded and where. Read-only."""
+    """Unified RAM/VRAM-aware model status (Phase 3D.0.5, req. 7). Read-only.
+
+    Reports the runtime mode, active voice, required TTS engine, loaded Voice
+    Lab model, Ollama + Whisper state, free RAM/VRAM (DEDICATED — never shared
+    GPU memory), the current heavy job, and fallback status — plus the RAM
+    Docker/WSL actually sees. Loads nothing; never auto-starts the worker."""
     print("=== Fifi local runtime: model status ===")
-    return 0 if llm_model_status(ollama_url(), configured_model()) else 1
+
+    # Docker/WSL RAM visibility (req. 8): warn if below the recommended floor.
+    mem = docker_wsl_memory()
+    if mem:
+        print(f"Docker/WSL RAM  : {mem.get('total_gb', '?')} GB total ({mem.get('source')})")
+        warning = docker_ram_warning(mem)
+        if warning:
+            print(warning)
+    else:
+        print("Docker/WSL RAM  : (docker unavailable)")
+
+    # LLM (Ollama) warm state — independent of the Voice Lab worker.
+    info = llm_loaded_info()
+    if info:
+        print(
+            f"Ollama LLM      : loaded ({configured_model()}, {info['processor']}, "
+            f"{info['vram_gb']} GB VRAM)"
+        )
+    else:
+        print(f"Ollama LLM      : not loaded ({configured_model()})")
+
+    # Voice Lab coordinator picture (never auto-starts the worker).
+    status = voice_lab_coordinator_status()
+    if status is None:
+        print("Voice Lab       : worker not reachable — no coordinator status.")
+        ram, vram = _system_ram_gb(), _vram_gb()
+        print(f"RAM free        : {ram.get('free_gb', '?')} GB (host)")
+        print(f"VRAM free       : {vram.get('free_gb', '?')} GB (host nvidia-smi, dedicated)")
+        return 0
+    engines_loaded = {k: v for k, v in (status.get("engines_loaded") or {}).items() if v}
+    heavy = status.get("current_heavy_job")
+    heavy_text = f"{heavy['job_id']} ({heavy.get('status')})" if heavy else "(none)"
+    print(f"Runtime mode    : {status.get('mode')}")
+    print(f"Active voice    : {status.get('active_voice')}")
+    print(f"Required engine : {status.get('required_tts_engine')}")
+    print(f"Loaded VL model : {status.get('loaded_voice_lab_model') or '(none)'}")
+    print(f"Engines loaded  : {engines_loaded or '(none)'}")
+    print(f"Ollama loaded   : {status.get('ollama_loaded') or '(none)'}")
+    print(f"Whisper loaded  : {status.get('whisper_loaded')}")
+    print(f"RAM free        : {status.get('system_ram_available_gb')} GB")
+    print(
+        f"VRAM free       : {status.get('dedicated_vram_free_gb')} GB "
+        f"(dedicated, {status.get('vram_source')})"
+    )
+    print(f"Heavy job       : {heavy_text}")
+    print(f"Fallback status : {status.get('fallback_status')}")
+    return 0
+
+
+def cmd_model_optimize(args: argparse.Namespace) -> int:
+    """Enforce the daily-use policy NOW: unload everything the active voice does
+    not need (heavy Qwen models it does not need, and idle Kokoro). Cached weight
+    files are never deleted; the LLM (Ollama) is untouched."""
+    print("=== Fifi local runtime: model optimize ===")
+    if voice_lab_health() is None:
+        print("Voice Lab       : worker not running — nothing loaded to optimize.")
+        return 0
+    result = voice_lab_optimize()
+    if result is None or result.get("status") != "ok":
+        print(f"Optimize FAILED : {result}")
+        return 1
+    print(f"Mode            : {result.get('mode')}")
+    print(f"Kept engine     : {result.get('kept_engine') or '(none)'}")
+    print(f"Kept model      : {result.get('kept_model') or '(none)'}")
+    print(f"Unloaded models : {result.get('unloaded_models')}")
+    print(f"Unloaded engines: {result.get('unloaded_engines')}")
+    print(f"Note            : {result.get('note')}")
+    return 0
 
 
 def cmd_unload(args: argparse.Namespace) -> int:
@@ -1316,6 +1435,56 @@ def cmd_voice_stop(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_voice_mode(args: argparse.Namespace) -> int:
+    """Switch the Voice Lab runtime mode (daily | designer | low-memory).
+
+    daily      — Ollama + Whisper + ONLY the active voice's TTS engine.
+    designer   — daily, but VoiceDesign is prioritized while creating identities.
+    low-memory — Kokoro / Windows only; heavy Qwen models are refused (and
+                 freed immediately). Switching persists across worker restarts.
+    """
+    print(f"=== Fifi local runtime: voice mode -> {args.mode} ===")
+    if not _voice_lab_up():
+        return 1
+    result = voice_lab_set_mode(args.mode)
+    if result is None or result.get("status") != "ok":
+        print(f"Mode switch FAILED: {result}")
+        return 1
+    print(f"Mode            : {result.get('previous_mode')} -> {result.get('mode')}")
+    # low-memory must free heavy models NOW so the mode is real immediately.
+    if result.get("mode") == "low-memory":
+        optimized = voice_lab_optimize() or {}
+        if optimized.get("status") == "ok":
+            print(
+                f"Freed heavy     : models={optimized.get('unloaded_models')} "
+                f"engines={optimized.get('unloaded_engines')}"
+            )
+    else:
+        print("Hint            : run 'model-optimize' to enforce the policy immediately.")
+    status = voice_lab_coordinator_status() or {}
+    print(f"Active voice    : {status.get('active_voice')}")
+    print(f"Required engine : {status.get('required_tts_engine')}")
+    print(f"Loaded VL model : {status.get('loaded_voice_lab_model') or '(none)'}")
+    return 0
+
+
+def cmd_voice_unload(args: argparse.Namespace) -> int:
+    """Release ALL Voice Lab VRAM (every loaded engine/model). Cached weight
+    files are never deleted; the LLM (Ollama) is untouched — use 'unload' for
+    that. Never auto-starts the worker."""
+    print("=== Fifi local runtime: voice unload ===")
+    if voice_lab_health() is None:
+        print("Voice Lab       : worker not running — nothing loaded to unload.")
+        return 0
+    result = voice_lab_unload_engines("")
+    if result is None or result.get("status") != "ok":
+        print(f"Unload FAILED   : {result}")
+        return 1
+    print(f"Unloaded        : {result.get('unloaded')}")
+    print("Models, caches, and profiles were not touched.")
+    return 0
+
+
 def _system_ram_gb() -> dict:
     """{total_gb, free_gb} via stdlib ctypes (Windows) — best-effort, no psutil."""
     try:
@@ -1364,6 +1533,66 @@ def _vram_gb() -> dict:
         return {"total_gb": round(float(total) / 1024, 1), "free_gb": round(float(free) / 1024, 1)}
     except Exception:
         return {}
+
+
+# Docker Desktop on WSL2 shares ONE memory pool across Ollama + the Voice Lab
+# container. Below this the two heavy tenants thrash; we warn (never edit
+# .wslconfig — see docs/WSL_MEMORY.md).
+DOCKER_MIN_RAM_GB = 12.0
+
+
+def _docker_info_mem_total_bytes() -> int | None:
+    """Total RAM the Docker engine (its WSL2 VM) sees, in bytes. Best-effort."""
+    try:
+        result = subprocess.run(
+            ["docker", "info", "--format", "{{.MemTotal}}"],
+            capture_output=True, text=True, timeout=20,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    try:
+        value = int((result.stdout or "").strip())
+        return value if value > 0 else None
+    except ValueError:
+        return None
+
+
+def docker_wsl_memory() -> dict:
+    """RAM actually visible to Docker/WSL — NOT the Windows host total.
+
+    When the Voice Lab runs in a container it measures its own (WSL VM) RAM;
+    otherwise we ask the Docker engine directly. Returns
+    {source, total_gb[, free_gb]} or {} when Docker is unavailable.
+    """
+    if voice_lab_runtime() == "docker":
+        res = voice_lab_resources()
+        total = (res or {}).get("system_ram_total_bytes")
+        if total:
+            free = (res or {}).get("system_ram_available_bytes") or 0
+            return {
+                "source": "voice-lab container",
+                "total_gb": round(total / 2**30, 1),
+                "free_gb": round(free / 2**30, 1),
+            }
+    total_bytes = _docker_info_mem_total_bytes()
+    if total_bytes:
+        return {"source": "docker info", "total_gb": round(total_bytes / 2**30, 1)}
+    return {}
+
+
+def docker_ram_warning(memory: dict) -> str | None:
+    """A one-line warning when Docker/WSL RAM is below the recommended floor."""
+    total = memory.get("total_gb")
+    if total is None or total >= DOCKER_MIN_RAM_GB:
+        return None
+    return (
+        f"WARNING: Docker/WSL sees only {total} GB RAM "
+        f"(< {DOCKER_MIN_RAM_GB:g} GB recommended). Loading the Voice Lab and "
+        "Ollama together may swap and make synthesis very slow. Raise the WSL2 "
+        "memory limit in %UserProfile%\\.wslconfig, run 'wsl --shutdown', then "
+        "restart Docker Desktop. See docs/WSL_MEMORY.md. "
+        "This tool never edits .wslconfig for you."
+    )
 
 
 def _voice_model_cache_state() -> dict:
@@ -1589,21 +1818,157 @@ def cmd_wake(args: argparse.Namespace) -> int:
 WAKE_LOG_FILE = LOG_DIR / "wake.log"
 
 
+def wake_metadata_path() -> Path:
+    """The metadata JSON beside the installed wake model (fifi.metadata.json)."""
+    return fifi_wake.wake_model_path().with_suffix(".metadata.json")
+
+
+def _tts_engine() -> str:
+    return llm_smoke.config_value("TTS_ENGINE", "windows").strip().lower()
+
+
+def _profile_engine_on_disk(name: str) -> dict:
+    """{engine, model, is_voice_design} for a profile file. Best-effort."""
+    info = {"engine": None, "model": "", "is_voice_design": False}
+    if not name:
+        return info
+    path = PROJECT_ROOT / "config" / "voices" / "profiles" / f"{name}.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return info
+    info["engine"] = data.get("engine")
+    info["model"] = data.get("model") or ""
+    info["is_voice_design"] = (
+        info["engine"] == "qwen3_tts" and "voicedesign" in info["model"].lower()
+    )
+    return info
+
+
+def _active_wake_voice() -> dict:
+    """The active daily voice + engine (worker /profile/active, else disk)."""
+    active = llm_smoke.get_json(f"{voice_lab_url()}/profile/active", timeout=5.0) or {}
+    profile = active.get("profile") or _profile_store_state().get("active_profile")
+    engine = active.get("engine")
+    disk = _profile_engine_on_disk(profile) if profile else {}
+    return {
+        "profile": profile,
+        "engine": engine or disk.get("engine"),
+        "is_voice_design": bool(disk.get("is_voice_design")),
+    }
+
+
+def wake_preconditions() -> list[dict]:
+    """Every readiness check for hands-free wake mode (Phase 3D.1). Read-only —
+    never launches or loads anything. Each entry is {name, ok, hard, detail};
+    a failed HARD check blocks wake-start, a SOFT one only warns.
+
+    Ensures: opt-in + deps + custom model, the main API is healthy, voice is
+    enabled, and (when TTS_ENGINE=voice_lab) the Voice Lab is healthy, the
+    runtime mode is 'daily', and the active daily voice is a responsive one
+    (Kokoro preferred; VoiceDesign is never loaded in wake mode).
+    """
+    checks: list[dict] = []
+
+    def add(name, ok, hard, detail):
+        checks.append({"name": name, "ok": bool(ok), "hard": hard, "detail": detail})
+
+    enabled = fifi_wake.wake_word_enabled()
+    add("Wake enabled", enabled, True,
+        "ENABLE_WAKE_WORD=true" if enabled
+        else "ENABLE_WAKE_WORD=false — set it to true in .env to opt in")
+    deps_ok, missing = fifi_wake.check_wake_deps()
+    add("Dependencies", deps_ok, True,
+        "installed" if deps_ok
+        else f"missing: {', '.join(missing)} (pip install -r requirements-wakeword.txt)")
+    model_ok = fifi_wake.wake_model_present()
+    add("Wake model", model_ok, True,
+        str(fifi_wake.wake_model_path()) if model_ok
+        else (f"MISSING at {fifi_wake.wake_model_path()} — it is never downloaded "
+              "automatically (see models/wake_words/README.md)"))
+
+    # Metadata + ONNX I/O validation (Phase 3D.2). SOFT: a valid model without
+    # provenance still runs, but wake-doctor surfaces it. The functional gate is
+    # the model load at wake-start; these only report on the installed artifact.
+    if model_ok:
+        from app.voice import wake_metadata
+
+        model_path = fifi_wake.wake_model_path()
+        meta_path = wake_metadata_path()
+        verification = wake_metadata.verify_installed(model_path, meta_path)
+        doc = verification.get("metadata") or {}
+        add("Model metadata", verification["ok"], False,
+            (f"phrase={doc.get('phrase')!r} v{doc.get('training_version')} "
+             f"threshold={doc.get('threshold')} hash verified") if verification["ok"]
+            else ("unverified — " + "; ".join(verification["problems"]) +
+                  " (install via wake_training to write fifi.metadata.json)"))
+        onnx = wake_metadata.validate_onnx_io(model_path)
+        if onnx.get("checked"):
+            add("Model ONNX", onnx["ok"], False,
+                "input/output compatible with the runtime" if onnx["ok"]
+                else "; ".join(onnx["problems"]))
+
+    health = api_health(api_url())
+    add("Main API", health is not None, True,
+        f"healthy at {api_url()}" if health
+        else f"not reachable at {api_url()} — run 'python scripts/local_runtime.py start'")
+    voice_on = bool(health and health.get("voice"))
+    add("Voice enabled", voice_on, True,
+        "enabled on the API" if voice_on
+        else "voice is disabled on the API (ENABLE_VOICE=false) — restart with it on")
+
+    engine = _tts_engine()
+    if engine == "voice_lab":
+        vl_health = voice_lab_health()
+        add("Voice Lab", vl_health is not None, True,
+            f"healthy at {voice_lab_url()}" if vl_health
+            else (f"not reachable at {voice_lab_url()} — start it, or set "
+                  "TTS_ENGINE=windows for host TTS"))
+        mode = (voice_lab_get_mode() or {}).get("mode") if vl_health else None
+        add("Runtime mode", mode == "daily", True,
+            f"daily" if mode == "daily"
+            else f"mode={mode!r} — run 'python scripts/local_runtime.py voice-mode daily'")
+        voice = _active_wake_voice()
+        if voice["engine"] == "kokoro":
+            add("Active voice", True, False,
+                f"{voice['profile']} (Kokoro — responsive)")
+        elif voice["is_voice_design"]:
+            add("Active voice", True, False,
+                f"{voice['profile']} (VoiceDesign — NEVER loaded in wake mode; replies "
+                "use Kokoro. Prefer a Kokoro daily profile.)")
+        elif voice["engine"]:
+            add("Active voice", True, False,
+                f"{voice['profile']} ({voice['engine']} — may be slow to warm; the TTS "
+                "guard falls back to Kokoro within the wait budget)")
+        else:
+            add("Active voice", True, False,
+                "(none selected — the configured default Kokoro voice applies)")
+    else:
+        add("TTS engine", True, False, f"{engine} (Windows host TTS; Voice Lab checks skipped)")
+
+    return checks
+
+
 def cmd_wake_start(args: argparse.Namespace) -> int:
-    """Start the wake listener in the BACKGROUND (owned, logged, single)."""
+    """Start the wake listener in the BACKGROUND (owned, logged, single).
+
+    Enforces the full readiness gate first (wake-doctor's HARD checks): opt-in +
+    deps + model, API healthy, voice enabled, and — when the Voice Lab is the TTS
+    engine — a healthy worker in 'daily' mode with a responsive daily voice."""
     print("=== Fifi local runtime: wake start ===")
     if fifi_wake.wake_active():
         print("Wake listener   : already running — not starting a duplicate.")
         return 0
-    deps_ok, missing = fifi_wake.check_wake_deps()
-    if not deps_ok:
-        print(f"Missing deps    : {', '.join(missing)}")
-        print("Install them    : pip install -r requirements-wakeword.txt")
+    checks = wake_preconditions()
+    hard_failures = [c for c in checks if c["hard"] and not c["ok"]]
+    if hard_failures:
+        for c in hard_failures:
+            print(f"Precondition    : {c['name']} — {c['detail']}")
+        print("Not starting wake mode — resolve the failures above (try 'wake-doctor').")
         return 1
-    if not fifi_wake.wake_model_present():
-        print(f"Wake model      : MISSING at {fifi_wake.wake_model_path()}")
-        print("It is never downloaded automatically — see models/wake_words/README.md")
-        return 1
+    for c in checks:  # surface the Kokoro-preference note before launching
+        if not c["hard"] and c["name"] == "Active voice":
+            print(f"Active voice    : {c['detail']}")
     ensure_dirs()
     log_handle = open(WAKE_LOG_FILE, "ab")
     process = subprocess.Popen(
@@ -1663,6 +2028,22 @@ def cmd_wake_status(args: argparse.Namespace) -> int:
         f"Model present   : {fifi_wake.wake_model_present()} "
         f"({fifi_wake.wake_model_path()})"
     )
+    # Installed-model provenance (Phase 3D.2): phrase, version, threshold, hash.
+    if fifi_wake.wake_model_present():
+        from app.voice import wake_metadata
+
+        info = wake_metadata.describe_installed(fifi_wake.wake_model_path(), wake_metadata_path())
+        if info["metadata_present"]:
+            print(
+                f"Model phrase    : {info['phrase']!r} (training {info['training_version']})"
+            )
+            print(f"Model threshold : {info['threshold']} (metadata)")
+            print(f"Model hash      : {info['hash']} (metadata_ok={info['metadata_ok']})")
+            if not info["metadata_ok"]:
+                for problem in info.get("metadata_problems", []):
+                    print(f"  ! {problem}")
+        else:
+            print(f"Model hash      : {info['hash']} (no metadata — provenance unknown)")
     print(f"Enabled         : {fifi_wake.wake_word_enabled()} (ENABLE_WAKE_WORD)")
     active = fifi_wake.wake_active()
     print(f"Active          : {active}")
@@ -1692,6 +2073,101 @@ def cmd_wake_status(args: argparse.Namespace) -> int:
     else:
         print("Last command    : (none recorded)")
     return 0
+
+
+def cmd_wake_doctor(args: argparse.Namespace) -> int:
+    """One-shot readiness diagnosis for hands-free wake mode (Phase 3D.1).
+
+    Exit code 0 = wake mode can start right now; nonzero otherwise. Read-only:
+    it never launches the listener, loads a model, or downloads anything."""
+    print("=== Fifi local runtime: wake doctor ===")
+    checks = wake_preconditions()
+    hard_fail = False
+    for c in checks:
+        if c["ok"]:
+            mark = "OK  "
+        elif c["hard"]:
+            mark = "FAIL"
+            hard_fail = True
+        else:
+            mark = "warn"
+        print(f"[{mark}] {c['name']:14}: {c['detail']}")
+    print(f"Wake active     : {fifi_wake.wake_active()}")
+    detection = read_wake_last_detection()
+    print(f"Last detection  : {detection or '(none recorded)'}")
+    if hard_fail:
+        print("Wake mode CANNOT start — resolve the FAIL items above.")
+        return 1
+    print("All required checks passed — wake mode can start (wake-start).")
+    return 0
+
+
+def cmd_wake_calibrate(args: argparse.Namespace) -> int:
+    """Live wake calibration (Phase 3D.2) — listen, show scores, recommend a
+    threshold. NEVER executes a command: the calibration listener has no
+    /voice/command client. Push-to-talk and wake mode are unaffected."""
+    print("=== Fifi local runtime: wake calibrate ===")
+    extra: list[str] = []
+    if getattr(args, "threshold", None) is not None:
+        extra += ["--threshold", str(args.threshold)]
+    if getattr(args, "fresh", False):
+        extra += ["--fresh"]
+    return wake_calibrate.run(extra)
+
+
+def cmd_autostart_enable(args: argparse.Namespace) -> int:
+    """Enable delayed, per-user auto-start of the Fifi tray (no admin, no secrets)."""
+    print("=== Fifi local runtime: autostart enable ===")
+    import fifi_tray
+
+    delay = getattr(args, "delay", None)
+    if delay is None:
+        delay = fifi_tray.StartupPolicy().startup_delay_seconds
+    result = fifi_autostart.enable(delay_seconds=delay)
+    if result.get("status") != "ok":
+        print(f"Enable FAILED   : {result.get('message')}")
+        return 1
+    print(f"Task            : {result['task_name']} (ONLOGON, delay {result['delay_seconds']}s)")
+    print(f"Launches        : {' '.join(result['launches'])}")
+    print(f"Note            : {result['detail']}")
+    return 0
+
+
+def cmd_autostart_disable(args: argparse.Namespace) -> int:
+    print("=== Fifi local runtime: autostart disable ===")
+    result = fifi_autostart.disable()
+    if result.get("status") != "ok":
+        print(f"Disable FAILED  : {result.get('message')}")
+        return 1
+    print(f"Auto-start      : {result['detail']} ({result['task_name']})")
+    return 0
+
+
+def cmd_autostart_status(args: argparse.Namespace) -> int:
+    print("=== Fifi local runtime: autostart status ===")
+    result = fifi_autostart.status()
+    print(f"Task            : {result['task_name']}")
+    print(f"Enabled         : {result['enabled']} ({result['detail']})")
+    return 0
+
+
+def cmd_tray(args: argparse.Namespace) -> int:
+    """Launch the Windows system-tray app (single-instance; host only)."""
+    print("=== Fifi local runtime: tray ===")
+    import fifi_tray
+
+    return fifi_tray.run([])
+
+
+def read_wake_last_detection() -> str:
+    """A safe one-line summary of the last wake detection, or '' — no audio."""
+    status = fifi_wake.read_wake_status()
+    detection = status.get("last_detection") if isinstance(status, dict) else None
+    if not detection:
+        return ""
+    score = detection.get("score")
+    score_text = f" score={score:.3f}" if isinstance(score, (int, float)) else ""
+    return f"{detection.get('utc')}{score_text}"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1727,8 +2203,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_warm = sub.add_parser("warm", help="load the LLM into VRAM (keep_alive=-1) + prewarm STT")
     p_warm.set_defaults(func=cmd_warm)
 
-    p_model_status = sub.add_parser("model-status", help="report the model's load/VRAM state")
+    p_model_status = sub.add_parser(
+        "model-status", help="unified RAM/VRAM-aware model status (mode, voice, engines)"
+    )
     p_model_status.set_defaults(func=cmd_model_status)
+
+    p_model_optimize = sub.add_parser(
+        "model-optimize",
+        help="unload everything the active voice does not need (keeps cached weights)",
+    )
+    p_model_optimize.set_defaults(func=cmd_model_optimize)
 
     p_unload = sub.add_parser("unload", help="release VRAM (keep_alive=0; deletes nothing)")
     p_unload.set_defaults(func=cmd_unload)
@@ -1746,6 +2230,34 @@ def build_parser() -> argparse.ArgumentParser:
     p_wake_status = sub.add_parser("wake-status", help="wake-word runtime status")
     p_wake_status.set_defaults(func=cmd_wake_status)
 
+    p_wake_doctor = sub.add_parser(
+        "wake-doctor", help="diagnose wake-mode readiness (exit 1 if it cannot start)"
+    )
+    p_wake_doctor.set_defaults(func=cmd_wake_doctor)
+
+    p_wake_calibrate = sub.add_parser(
+        "wake-calibrate",
+        help="live threshold calibration (listens, shows scores, NEVER runs commands)",
+    )
+    p_wake_calibrate.add_argument("--threshold", type=float, help="threshold to test")
+    p_wake_calibrate.add_argument("--fresh", action="store_true", help="clear prior observations")
+    p_wake_calibrate.set_defaults(func=cmd_wake_calibrate)
+
+    p_tray = sub.add_parser("tray", help="launch the Windows system-tray app (host only)")
+    p_tray.set_defaults(func=cmd_tray)
+
+    p_autostart_enable = sub.add_parser(
+        "autostart-enable", help="enable delayed per-user auto-start of the tray (no admin)"
+    )
+    p_autostart_enable.add_argument("--delay", type=int, help="startup delay seconds (default from FIFI_STARTUP_DELAY_SECONDS)")
+    p_autostart_enable.set_defaults(func=cmd_autostart_enable)
+
+    p_autostart_disable = sub.add_parser("autostart-disable", help="remove the auto-start task")
+    p_autostart_disable.set_defaults(func=cmd_autostart_disable)
+
+    p_autostart_status = sub.add_parser("autostart-status", help="is auto-start enabled?")
+    p_autostart_status.set_defaults(func=cmd_autostart_status)
+
     p_voice_start = sub.add_parser(
         "voice-start", help="start the isolated Voice Lab worker (127.0.0.1:8766)"
     )
@@ -1756,6 +2268,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_voice_stop = sub.add_parser("voice-stop", help="stop the Voice Lab worker")
     p_voice_stop.set_defaults(func=cmd_voice_stop)
+
+    p_voice_mode = sub.add_parser(
+        "voice-mode", help="switch runtime mode (daily | designer | low-memory)"
+    )
+    p_voice_mode.add_argument(
+        "mode", choices=["daily", "designer", "low-memory"], help="runtime mode"
+    )
+    p_voice_mode.set_defaults(func=cmd_voice_mode)
+
+    p_voice_unload = sub.add_parser(
+        "voice-unload", help="release ALL Voice Lab VRAM (keeps cached weights)"
+    )
+    p_voice_unload.set_defaults(func=cmd_voice_unload)
 
     p_voice_warm = sub.add_parser(
         "voice-warm", help="asynchronously warm the active voice profile"

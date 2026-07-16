@@ -249,3 +249,159 @@ def test_speak_tool_simulated_by_default(settings):
     response = handle_command(CommandRequest(text="say hello world"))
     assert response.status is ExecutionStatus.SIMULATED
     assert response.result["simulated"] is True
+
+
+# --- Phase 3D.1: daily wake-mode TTS latency guard (Qwen -> Kokoro) ------------------
+
+import httpx  # noqa: E402
+
+
+class _Resp:
+    def __init__(self, payload, status=200):
+        self.status_code = status
+        self._payload = payload
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise httpx.HTTPStatusError("err", request=None, response=None)
+
+    def json(self):
+        return self._payload
+
+
+class FakeVoiceLab:
+    """A fake Voice Lab /synthesize: per-profile behavior 'timeout' | 'error' |
+    ('ok', engine). Records which profiles were contacted, in order."""
+
+    def __init__(self, behavior):
+        self.behavior = behavior
+        self.calls: list[str] = []
+
+    def __call__(self, url, json=None, timeout=None):
+        profile = json["profile"]
+        self.calls.append(profile)
+        outcome = self.behavior.get(profile, ("ok", "kokoro"))
+        if outcome == "timeout":
+            raise httpx.ReadTimeout("synthesis slow")
+        if outcome == "error":
+            raise httpx.ConnectError("worker down")
+        _, engine = outcome
+        # The worker reports its OWN fallback (requested engine failed). Here the
+        # requested engine serves the request, so False; the guard's Qwen->Kokoro
+        # fallback is signalled separately by _voice_lab_payload's param.
+        return _Resp({
+            "status": "ok", "profile": profile, "engine": engine, "fallback_used": False,
+        })
+
+
+def _wake_voice(voice_on, monkeypatch, *, active, active_info, behavior, fallback="fifi_warm"):
+    voice_on.enable_voice = True
+    voice_on.tts_engine = "voice_lab"
+    voice_on.voice_profile = fallback  # the Kokoro fallback voice
+    voice_on.wake_max_tts_wait_seconds = 20.0
+    monkeypatch.setattr(tts_module, "active_voice_profile", lambda: active)
+    monkeypatch.setattr(
+        tts_module, "profile_engine_info",
+        lambda name: active_info if name == active else
+        {"engine": "kokoro", "model": "hexgrad/Kokoro-82M", "is_voice_design": False},
+    )
+    fake = FakeVoiceLab(behavior)
+    monkeypatch.setattr(tts_module.httpx, "post", fake)
+    return fake
+
+
+def test_wake_tts_qwen_timeout_falls_back_to_kokoro(voice_on, monkeypatch):
+    """A slow/cold Qwen daily voice must never keep the user waiting: the reply
+    falls back to KOKORO (not Windows), reporting requested vs actual engine."""
+    fake = _wake_voice(
+        voice_on, monkeypatch,
+        active="fifi_luna",
+        active_info={"engine": "qwen3_tts", "model": "Qwen/...0.6B-Base", "is_voice_design": False},
+        behavior={"fifi_luna": "timeout", "fifi_warm": ("ok", "kokoro")},
+    )
+    result = tts_module.TextToSpeechService().speak("hola", wake=True)
+    assert result["requested_engine"] == "qwen3_tts"
+    assert result["actual_engine"] == "kokoro"
+    assert result["fallback_used"] is True
+    assert "Kokoro" in result["fallback_reason"]
+    assert fake.calls == ["fifi_luna", "fifi_warm"]  # tried Qwen, then Kokoro
+
+
+def test_wake_tts_never_loads_voicedesign(voice_on, monkeypatch):
+    """A VoiceDesign active voice is NEVER contacted in wake mode — the reply is
+    spoken with Kokoro directly."""
+    fake = _wake_voice(
+        voice_on, monkeypatch,
+        active="fifi_nova",
+        active_info={"engine": "qwen3_tts", "model": "Qwen/...VoiceDesign", "is_voice_design": True},
+        behavior={"fifi_warm": ("ok", "kokoro")},
+    )
+    result = tts_module.TextToSpeechService().speak("hola", wake=True)
+    assert result["requested_engine"] == "voice_design"
+    assert result["actual_engine"] == "kokoro"
+    assert result["fallback_used"] is True
+    assert "fifi_nova" not in fake.calls  # the VoiceDesign profile is never loaded
+    assert fake.calls == ["fifi_warm"]
+
+
+def test_wake_tts_kokoro_active_has_no_fallback(voice_on, monkeypatch):
+    fake = _wake_voice(
+        voice_on, monkeypatch,
+        active="fifi_warm",
+        active_info={"engine": "kokoro", "model": "hexgrad/Kokoro-82M", "is_voice_design": False},
+        behavior={"fifi_warm": ("ok", "kokoro")},
+    )
+    result = tts_module.TextToSpeechService().speak("hola", wake=True)
+    assert result["requested_engine"] == "kokoro"
+    assert result["actual_engine"] == "kokoro"
+    assert result["fallback_used"] is False
+    assert fake.calls == ["fifi_warm"]  # a single attempt, no fallback
+
+
+def test_non_wake_qwen_timeout_uses_windows_not_kokoro(voice_on, monkeypatch):
+    """Outside wake mode the behavior is unchanged: a worker timeout degrades to
+    Windows TTS, and there is NO Kokoro re-request."""
+    fake = _wake_voice(
+        voice_on, monkeypatch,
+        active="fifi_luna",
+        active_info={"engine": "qwen3_tts", "model": "Qwen/...0.6B-Base", "is_voice_design": False},
+        behavior={"fifi_luna": "timeout"},
+    )
+
+    class FakeDriver:
+        def say(self, text):
+            pass
+
+        def runAndWait(self):
+            pass
+
+    monkeypatch.setattr(tts_module, "pyttsx3", type("P", (), {"init": staticmethod(FakeDriver)}))
+    result = tts_module.TextToSpeechService().speak("hola", wake=False)
+    assert result.get("fallback_from") == "voice_lab"  # Windows, not Kokoro
+    assert result.get("actual_engine") is None
+    assert fake.calls == ["fifi_luna"]  # no second (Kokoro) attempt in non-wake mode
+
+
+def test_voice_command_wake_forces_spoken_reply_with_guard(client, voice_on, fake_whisper, monkeypatch):
+    """?wake=true voices the reply even when VOICE_SPEAK_COMMAND_RESPONSE is off,
+    applying the latency guard; a non-wake request stays silent."""
+    voice_on.voice_speak_command_response = False  # PTT speaking OFF
+    fake = _wake_voice(
+        voice_on, monkeypatch,
+        active="fifi_luna",
+        active_info={"engine": "qwen3_tts", "model": "Qwen/...0.6B-Base", "is_voice_design": False},
+        behavior={"fifi_luna": "timeout", "fifi_warm": ("ok", "kokoro")},
+    )
+    fake_whisper("abre descargas", language="es")
+    data = client.post("/voice/command?wake=true", files=upload()).json()
+    assert data["status"] == "ok"
+    assert data["command"]["intent"] == "open_folder"  # command STILL executed
+    speech = data["speech"]
+    assert speech["status"] == "spoken"
+    assert speech["requested_engine"] == "qwen3_tts"
+    assert speech["actual_engine"] == "kokoro"
+    assert speech["fallback_used"] is True
+
+    # A non-wake request with speaking off does NOT speak (PTT unchanged).
+    silent = client.post("/voice/command", files=upload()).json()
+    assert "speech" not in silent

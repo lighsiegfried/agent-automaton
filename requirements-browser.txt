@@ -1,0 +1,11 @@
+# Optional browser-automation dependencies (Phase 4B). NOT required for the base
+# API — install only to use the /browser endpoints on the Windows host:
+#   pip install -r requirements-browser.txt
+#   python -m playwright install chromium
+#
+# The browser runs a dedicated, ISOLATED Chromium profile under storage/browser/
+# — never the user's real Chrome/Edge profile, and cookies are never imported.
+# All /browser endpoints answer {"status":"disabled"} until
+# ENABLE_BROWSER_AUTOMATION=true.
+
+playwright>=1.45          # Chromium automation (app/browser/*)

@@ -74,6 +74,36 @@ def active_voice_profile() -> str | None:
     return active_voice_info()["profile"]
 
 
+# Shared profile store (written by the Voice Lab; read-only here). We only need
+# the engine/model to know whether the active voice is a heavy VoiceDesign one —
+# the main process never loads a neural model.
+_PROFILES_DIR = PROJECT_ROOT / "config" / "voices" / "profiles"
+
+
+def profile_engine_info(name: str | None) -> dict[str, Any]:
+    """{engine, model, is_voice_design} for a profile, from its shared JSON.
+
+    Never raises; an unknown/unreadable profile returns engine=None. Used by the
+    wake TTS guard to keep VoiceDesign out of hands-free replies without importing
+    anything from the isolated Voice Lab package.
+    """
+    info: dict[str, Any] = {"engine": None, "model": "", "is_voice_design": False}
+    if not name:
+        return info
+    try:
+        data = json.loads((_PROFILES_DIR / f"{name}.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return info
+    engine = data.get("engine")
+    model = data.get("model")
+    info["engine"] = engine if isinstance(engine, str) else None
+    info["model"] = model if isinstance(model, str) else ""
+    info["is_voice_design"] = (
+        info["engine"] == "qwen3_tts" and "voicedesign" in info["model"].lower()
+    )
+    return info
+
+
 class TextToSpeechService:
     def __init__(self, engine: str | None = None) -> None:
         self.engine = (engine or get_settings().tts_engine).lower()
@@ -91,7 +121,10 @@ class TextToSpeechService:
             "note": note,
         }
 
-    def speak(self, text: str) -> dict[str, Any]:
+    def speak(self, text: str, wake: bool = False) -> dict[str, Any]:
+        """Speak `text`. In wake mode (Phase 3D.1) the Voice Lab path applies the
+        daily latency guard: a shorter budget, Qwen->Kokoro fallback, and never
+        VoiceDesign — the command already ran, so the reply must not stall."""
         text = (text or "").strip()
         if not text:
             return {"action": "speak", "error": "Empty text."}
@@ -99,7 +132,7 @@ class TextToSpeechService:
         if not get_settings().enable_voice:
             return self._simulate(text, "Voice is disabled (ENABLE_VOICE=false).")
         if self.engine == "voice_lab":
-            return self._speak_voice_lab(text)
+            return self._speak_voice_lab(text, wake=wake)
         if self.engine != "windows":
             return self._simulate(text, f"TTS engine {self.engine!r} has no real backend yet.")
         return self._speak_windows(text)
@@ -120,48 +153,112 @@ class TextToSpeechService:
 
     # -- Voice Lab worker (Phase 3D.0) -------------------------------------------------
 
-    def _speak_voice_lab(self, text: str) -> dict[str, Any]:
-        """Ask the isolated worker to synthesize + play. No models load here."""
+    def _speak_voice_lab(self, text: str, wake: bool = False) -> dict[str, Any]:
+        """Ask the isolated worker to synthesize + play. No models load here.
+
+        Wake mode (Phase 3D.1) enforces the daily latency guard:
+        - a shorter budget (WAKE_MAX_TTS_WAIT_SECONDS) so a slow/cold Qwen voice
+          never keeps the user waiting;
+        - if the active voice can't answer in time, fall back to KOKORO (never
+          Windows), reporting the requested vs actual engine;
+        - a VoiceDesign active voice is never loaded — the reply uses Kokoro.
+        Outside wake mode the behavior is unchanged (worker timeout -> Windows).
+        """
         settings = get_settings()
-        profile = active_voice_profile() or settings.voice_profile
+        active = active_voice_profile() or settings.voice_profile
+        info = profile_engine_info(active)
+        requested_engine = info["engine"] or "voice_lab"
+        kokoro_profile = settings.voice_profile
+        timeout = (
+            settings.wake_max_tts_wait_seconds if wake else settings.voice_lab_timeout_seconds
+        )
+
+        # Wake mode NEVER loads VoiceDesign — speak with the Kokoro voice instead.
+        if wake and info["is_voice_design"]:
+            result, status, reason = self._post_synthesize(kokoro_profile, text, timeout)
+            if status == "ok":
+                return self._voice_lab_payload(
+                    text, result, requested_engine="voice_design", fallback_used=True,
+                    fallback_reason="VoiceDesign no se carga en modo wake — voz Kokoro",
+                )
+            return self._voice_lab_fallback(
+                text, f"VoiceDesign bloqueado en wake y Kokoro falló: {reason}"
+            )
+
+        result, status, reason = self._post_synthesize(active, text, timeout)
+        if status == "ok":
+            return self._voice_lab_payload(text, result, requested_engine=requested_engine)
+
+        # Wake latency fallback: the active (Qwen) voice was too slow -> Kokoro,
+        # NEVER Windows here. The command already executed; only the voice changes.
+        if wake and status == "timeout" and active != kokoro_profile:
+            result, kstatus, kreason = self._post_synthesize(
+                kokoro_profile, text, settings.wake_max_tts_wait_seconds
+            )
+            if kstatus == "ok":
+                return self._voice_lab_payload(
+                    text, result, requested_engine=requested_engine, fallback_used=True,
+                    fallback_reason=(
+                        f"{requested_engine} tardó más de {timeout:g}s — voz Kokoro"
+                    ),
+                )
+            reason = kreason  # Kokoro also failed -> last-resort Windows below
+
+        return self._voice_lab_fallback(text, reason)
+
+    def _post_synthesize(
+        self, profile: str, text: str, timeout: float
+    ) -> tuple[dict[str, Any] | None, str, str]:
+        """POST /synthesize for one profile. Returns (result, status, reason)
+        where status is 'ok' | 'timeout' | 'error'. Never raises."""
+        settings = get_settings()
         try:
             response = httpx.post(
                 f"{settings.voice_lab_url}/synthesize",
                 json={"text": text, "profile": profile, "play": True},
-                timeout=settings.voice_lab_timeout_seconds,
+                timeout=timeout,
             )
             response.raise_for_status()
             result = response.json()
         except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
-            # Connection failures mean the worker is truly unreachable...
-            return self._voice_lab_fallback(
-                text, f"Voice Lab worker unavailable ({type(exc).__name__})"
-            )
+            return None, "error", f"Voice Lab worker unavailable ({type(exc).__name__})"
         except httpx.TimeoutException as exc:
-            # ...while a read timeout means it is up but synthesis took too
-            # long (e.g. a cold model load) — a different, clearer failure.
-            return self._voice_lab_fallback(
-                text,
-                f"Voice Lab synthesis timed out after "
-                f"{settings.voice_lab_timeout_seconds:g}s ({type(exc).__name__})",
+            # Up, but synthesis took too long (e.g. a cold Qwen load).
+            return None, "timeout", (
+                f"Voice Lab synthesis timed out after {timeout:g}s ({type(exc).__name__})"
             )
         except (httpx.HTTPError, ValueError) as exc:
-            return self._voice_lab_fallback(
-                text, f"Voice Lab request failed ({type(exc).__name__})"
-            )
+            return None, "error", f"Voice Lab request failed ({type(exc).__name__})"
         if result.get("status") != "ok":
-            return self._voice_lab_fallback(
-                text, result.get("message") or "Voice Lab synthesis failed"
-            )
-        return {
+            return None, "error", result.get("message") or "Voice Lab synthesis failed"
+        return result, "ok", ""
+
+    def _voice_lab_payload(
+        self,
+        text: str,
+        result: dict[str, Any],
+        *,
+        requested_engine: str,
+        fallback_used: bool | None = None,
+        fallback_reason: str = "",
+    ) -> dict[str, Any]:
+        actual = result.get("engine")  # the engine that ACTUALLY produced audio
+        payload: dict[str, Any] = {
             "simulated": False,
             "action": "speak",
             "spoke": text,
             "engine": "voice_lab",
             "profile": result.get("profile"),
-            "synthesis_engine": result.get("engine"),
-            "fallback_used": bool(result.get("fallback_used")),
+            "requested_engine": requested_engine,
+            "actual_engine": actual,
+            "synthesis_engine": actual,  # legacy key
+            "fallback_used": (
+                bool(result.get("fallback_used")) if fallback_used is None else fallback_used
+            ),
         }
+        if fallback_reason:
+            payload["fallback_reason"] = fallback_reason
+        return payload
 
     def _voice_lab_fallback(self, text: str, reason: str) -> dict[str, Any]:
         """Worker down/broken: degrade to Windows TTS when allowed, never raise."""

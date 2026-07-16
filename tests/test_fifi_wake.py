@@ -596,6 +596,7 @@ def test_wake_runtime_subcommands_are_wired():
     assert parser.parse_args(["wake-start"]).func is local_runtime.cmd_wake_start
     assert parser.parse_args(["wake-stop"]).func is local_runtime.cmd_wake_stop
     assert parser.parse_args(["wake-status"]).func is local_runtime.cmd_wake_status
+    assert parser.parse_args(["wake-doctor"]).func is local_runtime.cmd_wake_doctor
     args = parser.parse_args(["wake"])
     assert args.func is local_runtime.cmd_wake and args.debug is False
 
@@ -607,25 +608,39 @@ def _args():
     return Args()
 
 
-def test_wake_start_refuses_without_model(monkeypatch, capsys):
+def _all_preconditions_ok():
+    return [
+        {"name": "Wake enabled", "ok": True, "hard": True, "detail": "ENABLE_WAKE_WORD=true"},
+        {"name": "Dependencies", "ok": True, "hard": True, "detail": "installed"},
+        {"name": "Wake model", "ok": True, "hard": True, "detail": "fifi.onnx"},
+        {"name": "Main API", "ok": True, "hard": True, "detail": "healthy"},
+        {"name": "Voice enabled", "ok": True, "hard": True, "detail": "enabled"},
+        {"name": "Voice Lab", "ok": True, "hard": True, "detail": "healthy"},
+        {"name": "Runtime mode", "ok": True, "hard": True, "detail": "daily"},
+        {"name": "Active voice", "ok": True, "hard": False, "detail": "fifi_warm (Kokoro — responsive)"},
+    ]
+
+
+def test_wake_start_refuses_when_a_hard_precondition_fails(monkeypatch, capsys):
     monkeypatch.setattr(fifi_wake, "wake_active", lambda: False)
-    monkeypatch.setattr(fifi_wake, "check_wake_deps", lambda: (True, []))
-    monkeypatch.setattr(fifi_wake, "wake_model_present", lambda: False)
+    monkeypatch.setattr(local_runtime, "wake_preconditions", lambda: [
+        {"name": "Wake model", "ok": False, "hard": True,
+         "detail": "MISSING at models/wake_words/fifi.onnx — it is never downloaded automatically"},
+    ])
     monkeypatch.setattr(
         local_runtime.subprocess, "Popen",
         lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not launch")),
     )
     assert local_runtime.cmd_wake_start(_args()) == 1
     out = capsys.readouterr().out
-    assert "MISSING" in out
-    assert "never downloaded" in out
+    assert "MISSING" in out and "never downloaded" in out
+    assert "wake-doctor" in out
 
 
-def test_wake_start_launches_and_waits_for_ready(monkeypatch, tmp_path, capsys):
+def test_wake_start_launches_when_preconditions_pass(monkeypatch, tmp_path, capsys):
     active = iter([False, True])  # pre-check, then ready
     monkeypatch.setattr(fifi_wake, "wake_active", lambda: next(active, True))
-    monkeypatch.setattr(fifi_wake, "check_wake_deps", lambda: (True, []))
-    monkeypatch.setattr(fifi_wake, "wake_model_present", lambda: True)
+    monkeypatch.setattr(local_runtime, "wake_preconditions", _all_preconditions_ok)
     monkeypatch.setattr(local_runtime, "ensure_dirs", lambda: None)
     monkeypatch.setattr(local_runtime, "WAKE_LOG_FILE", tmp_path / "wake.log")
     monkeypatch.setattr(
@@ -646,13 +661,14 @@ def test_wake_start_launches_and_waits_for_ready(monkeypatch, tmp_path, capsys):
     assert local_runtime.cmd_wake_start(_args()) == 0
     assert "fifi_wake.py" in " ".join(launched["cmd"])
     assert "--server" in launched["cmd"]
-    assert "running" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "running" in out
+    assert "Active voice    : fifi_warm (Kokoro" in out  # soft note surfaced
 
 
 def test_wake_start_reports_startup_exit_with_log(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(fifi_wake, "wake_active", lambda: False)
-    monkeypatch.setattr(fifi_wake, "check_wake_deps", lambda: (True, []))
-    monkeypatch.setattr(fifi_wake, "wake_model_present", lambda: True)
+    monkeypatch.setattr(local_runtime, "wake_preconditions", _all_preconditions_ok)
     monkeypatch.setattr(local_runtime, "ensure_dirs", lambda: None)
     log = tmp_path / "wake.log"
     log.write_text("Wake word unavailable: custom model missing\n", encoding="utf-8")
@@ -670,6 +686,98 @@ def test_wake_start_reports_startup_exit_with_log(monkeypatch, tmp_path, capsys)
     out = capsys.readouterr().out
     assert "exited during startup" in out
     assert "custom model missing" in out  # last safe log lines shown
+
+
+# --- Phase 3D.1: wake preconditions + wake-doctor (readiness gate) --------------------
+
+
+def _pass_preconditions(monkeypatch, *, tts="voice_lab", mode="daily", voice_engine="kokoro"):
+    """Make every wake precondition pass (voice_lab TTS, daily mode, Kokoro voice)."""
+    from pathlib import Path as _Path
+
+    monkeypatch.setattr(fifi_wake, "wake_word_enabled", lambda: True)
+    monkeypatch.setattr(fifi_wake, "check_wake_deps", lambda: (True, []))
+    monkeypatch.setattr(fifi_wake, "wake_model_present", lambda: True)
+    monkeypatch.setattr(fifi_wake, "wake_model_path", lambda: _Path("models/wake_words/fifi.onnx"))
+    monkeypatch.setattr(local_runtime, "api_health", lambda url: {"status": "ok", "voice": True})
+    monkeypatch.setattr(local_runtime, "_tts_engine", lambda: tts)
+    monkeypatch.setattr(local_runtime, "voice_lab_health", lambda: {"status": "ok"})
+    monkeypatch.setattr(local_runtime, "voice_lab_get_mode", lambda: {"mode": mode})
+    monkeypatch.setattr(local_runtime, "_active_wake_voice", lambda: {
+        "profile": "fifi_warm",
+        "engine": "qwen3_tts" if voice_engine == "voice_design" else voice_engine,
+        "is_voice_design": voice_engine == "voice_design",
+    })
+
+
+def _by_name(checks):
+    return {c["name"]: c for c in checks}
+
+
+def test_wake_preconditions_all_pass(monkeypatch):
+    _pass_preconditions(monkeypatch)
+    checks = local_runtime.wake_preconditions()
+    assert all(c["ok"] for c in checks if c["hard"])  # every HARD check ok
+    by = _by_name(checks)
+    assert by["Runtime mode"]["detail"] == "daily"
+    assert by["Voice enabled"]["ok"] is True
+
+
+def test_wake_precondition_fails_when_mode_not_daily(monkeypatch):
+    _pass_preconditions(monkeypatch, mode="low-memory")
+    by = _by_name(local_runtime.wake_preconditions())
+    assert by["Runtime mode"]["ok"] is False and by["Runtime mode"]["hard"] is True
+    assert "voice-mode daily" in by["Runtime mode"]["detail"]
+
+
+def test_wake_precondition_fails_when_voice_lab_down(monkeypatch):
+    _pass_preconditions(monkeypatch)
+    monkeypatch.setattr(local_runtime, "voice_lab_health", lambda: None)
+    by = _by_name(local_runtime.wake_preconditions())
+    assert by["Voice Lab"]["ok"] is False and by["Voice Lab"]["hard"] is True
+
+
+def test_wake_precondition_fails_when_api_down(monkeypatch):
+    _pass_preconditions(monkeypatch)
+    monkeypatch.setattr(local_runtime, "api_health", lambda url: None)
+    by = _by_name(local_runtime.wake_preconditions())
+    assert by["Main API"]["ok"] is False and by["Main API"]["hard"] is True
+    assert by["Voice enabled"]["ok"] is False  # can't confirm voice with the API down
+
+
+def test_wake_precondition_voicedesign_active_is_soft_warn(monkeypatch):
+    _pass_preconditions(monkeypatch, voice_engine="voice_design")
+    av = _by_name(local_runtime.wake_preconditions())["Active voice"]
+    assert av["hard"] is False  # never blocks — the guard handles it
+    assert "NEVER loaded in wake mode" in av["detail"]
+
+
+def test_wake_precondition_windows_tts_skips_voice_lab_checks(monkeypatch):
+    _pass_preconditions(monkeypatch, tts="windows")
+    by = _by_name(local_runtime.wake_preconditions())
+    assert "Voice Lab" not in by and "Runtime mode" not in by
+    assert by["TTS engine"]["ok"] is True
+
+
+def test_wake_doctor_exit_codes(monkeypatch, capsys):
+    _pass_preconditions(monkeypatch)
+    monkeypatch.setattr(fifi_wake, "wake_active", lambda: False)
+    monkeypatch.setattr(fifi_wake, "read_wake_status", lambda: {})
+    assert local_runtime.cmd_wake_doctor(_args()) == 0
+    assert "wake mode can start" in capsys.readouterr().out.lower()
+
+    monkeypatch.setattr(local_runtime, "voice_lab_get_mode", lambda: {"mode": "designer"})
+    assert local_runtime.cmd_wake_doctor(_args()) == 1  # mode != daily -> cannot start
+    out = capsys.readouterr().out
+    assert "CANNOT start" in out
+    assert "voice-mode daily" in out
+
+
+def test_wake_listener_marks_requests_as_wake_mode():
+    """The listener flags its client so /voice/command applies the TTS guard —
+    this NEVER confirms or permits anything (only voices the reply)."""
+    source = (PROJECT_ROOT / "scripts" / "fifi_wake.py").read_text(encoding="utf-8")
+    assert "wake_mode = True" in source
 
 
 def test_wake_stop_only_touches_owned_pid(monkeypatch, tmp_path, capsys):

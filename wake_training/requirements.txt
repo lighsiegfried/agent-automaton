@@ -1,0 +1,27 @@
+# Isolated wake-word TRAINING dependencies (Phase 3D.2). Installed ONLY into
+# wake_training/.venv by wake_training/scripts/setup.py — NEVER into the main
+# project .venv (heavy: torch, openWakeWord, audio corpora tooling).
+#
+#   python wake_training/scripts/setup.py
+#
+# torch (CUDA cu128 for RTX 50 / Blackwell) is installed separately by setup.py,
+# and piper-sample-generator (synthetic Spanish voices) is git-cloned + its voice
+# model downloaded by setup.py — neither is pinned here.
+
+openwakeword>=0.6.0        # training pipeline + ONNX/TFLite export (custom model)
+onnx>=1.16                 # ONNX graph inspection/validation for export checks
+onnxruntime>=1.17          # ONNX inference: evaluation, latency, I/O validation
+numpy>=1.26                # audio arrays + feature/metric math
+scipy>=1.11                # resampling + signal ops used by augmentation
+soundfile>=0.12            # WAV read/write (datasets, recordings, calibration)
+librosa>=0.10              # pitch/speed analysis for augmentation + evaluation
+audiomentations>=0.35      # pitch / speed / gain / noise / reverb augmentation
+scikit-learn>=1.3          # OPTIONAL speaker-verifier logistic head (disabled by default)
+PyYAML>=6.0                # candidate + openWakeWord training config files
+tqdm>=4.66                 # progress during generation / augmentation / training
+sounddevice>=0.4.7         # microphone capture for record_samples.py + wake-calibrate
+
+# OPTIONAL — uncomment to stream large negative/background corpora (AudioSet, FMA,
+# ACAV) instead of providing local folders. Large download; not required when you
+# point negatives at local 16 kHz audio folders (see README.md).
+# datasets>=2.19
